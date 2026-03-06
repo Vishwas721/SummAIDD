@@ -9,6 +9,7 @@ import { Document, Page, pdfjs } from 'react-pdf'
 import 'react-pdf/dist/Page/AnnotationLayer.css'
 import 'react-pdf/dist/Page/TextLayer.css'
 import { MedicalChartsPanel } from './MedicalChart'
+import { logClickedCitation } from '../utils/auditLogger'
 
 // Configure PDF.js worker
 pdfjs.GlobalWorkerOptions.workerSrc = new URL(
@@ -574,6 +575,10 @@ const handleClaimFileUpload = useCallback(async (file) => {
   const handleOpenCitation = (idx) => {
     setSelectedCitation(idx)
     const c = citations[idx]
+    
+    // Epic 4.1: Log CLICKED_CITATION audit event
+    logClickedCitation(patientId, c)
+    
     const src = getCitationPdfUrl(c)
     const page = c?.source_metadata?.page ?? c?.source_metadata?.page_number ?? 1
     const search = (c?.source_text_preview || '').slice(0, 160)

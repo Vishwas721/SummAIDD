@@ -8,6 +8,7 @@ import { VitalTrendsCard } from './VitalTrendsCard'
 import { OncologyCard } from './OncologyCard'
 import { SpeechCard } from './SpeechCard'
 import { PdfCitationViewer } from './PdfCitationViewer'
+import { logClickedCitation, logExportedPdf } from '../../utils/auditLogger'
 
 /**
  * SummaryGrid - Modern card-based layout for displaying structured patient summaries.
@@ -59,6 +60,9 @@ export function SummaryGrid({ patientId }) {
 
   const openCitation = async (citation) => {
     try {
+      // Epic 4.1: Log CLICKED_CITATION audit event
+      logClickedCitation(patientId, citation)
+      
       setPdfError(null)
       setSelectedCitation(citation)
       const apiUrl = import.meta.env.VITE_API_URL
@@ -263,6 +267,9 @@ export function SummaryGrid({ patientId }) {
               title="Export the AI-generated clinical summary (without original report text) as a PDF for sharing or EHR upload."
               onClick={() => {
                 try {
+                  // Epic 4.1: Log EXPORTED_PDF audit event
+                  logExportedPdf(patientId, 'clinical_summary')
+                  
                   import('jspdf').then(async (mod) => {
                     const JsPDF = mod.jsPDF || mod.default
                     const doc = new JsPDF({ unit: 'pt', format: 'a4' })

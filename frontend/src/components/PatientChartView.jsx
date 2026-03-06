@@ -10,6 +10,7 @@ import { cn } from '../lib/utils'
 import Highlighter from 'react-highlight-words'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
+import { logViewedSummary, logExportedPdf } from '../utils/auditLogger'
 
 // Configure PDF.js worker - use local build from node_modules
 pdfjs.GlobalWorkerOptions.workerSrc = new URL(
@@ -113,6 +114,14 @@ export function PatientChartView({ patientId }) {
       fetchPersistedSummary()
     }
   }, [patientId])
+
+  // Epic 4.1: Log VIEWED_SUMMARY audit event when doctor opens patient chart
+  useEffect(() => {
+    if (!patientId || userRole !== 'DOCTOR') return
+    
+    // Log asynchronously without blocking UI
+    logViewedSummary(patientId)
+  }, [patientId, userRole])
 
   // Fetch reports when patientId changes
   useEffect(() => {
@@ -395,6 +404,9 @@ export function PatientChartView({ patientId }) {
   const handlePrintPrescription = () => {
     if (!drugName.trim()) return
 
+    // Epic 4.1: Log EXPORTED_PDF audit event
+    logExportedPdf(patientId, 'prescription')
+
     const doc = new jsPDF()
     const margin = 20
     const pageWidth = doc.internal.pageSize.getWidth()
@@ -618,6 +630,9 @@ export function PatientChartView({ patientId }) {
 
   const handleDownloadPdf = () => {
     try {
+      // Epic 4.1: Log EXPORTED_PDF audit event
+      logExportedPdf(patientId, 'clinical_summary')
+      
       const doc = new jsPDF({ unit: 'pt', format: 'a4' })
       const margin = 50
       const pageWidth = doc.internal.pageSize.getWidth()
