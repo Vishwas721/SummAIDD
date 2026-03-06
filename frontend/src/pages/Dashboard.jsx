@@ -1,4 +1,5 @@
 import { useState, useEffect } from 'react'
+import { useLocation } from 'react-router-dom'
 import axios from 'axios'
 import { PatientSidebar } from '../components/PatientSidebar'
 import { PatientHeader } from '../components/PatientHeader'
@@ -11,7 +12,9 @@ import { cn } from '../lib/utils'
 export default function Dashboard() {
   const [selectedPatientId, setSelectedPatientId] = useState(null)
   const [apiStatus, setApiStatus] = useState('checking...')
+  const [focusInsuranceTab, setFocusInsuranceTab] = useState(false)
   const { user, logout } = useAuth()
+  const location = useLocation()
 
   useEffect(() => {
     const checkApiHealth = async () => {
@@ -27,8 +30,19 @@ export default function Dashboard() {
     checkApiHealth()
   }, [])
 
+  // Handle routing state from TPA Queue
+  useEffect(() => {
+    if (location.state?.patientId) {
+      setSelectedPatientId(location.state.patientId)
+      if (location.state.focusInsuranceTab) {
+        setFocusInsuranceTab(true)
+      }
+    }
+  }, [location.state])
+
   const handleSelectPatient = (patientId) => {
     setSelectedPatientId(patientId)
+    setFocusInsuranceTab(false) // Reset when manually selecting patient
   }
 
   return (
@@ -43,7 +57,10 @@ export default function Dashboard() {
         ) : (
           <div className="w-full h-full overflow-auto">
             {selectedPatientId ? (
-              <SummaryPanel patientId={selectedPatientId} />
+              <SummaryPanel 
+                patientId={selectedPatientId} 
+                initialTab={focusInsuranceTab ? 'insurance' : 'summary'}
+              />
             ) : (
               <div className="flex items-center justify-center h-full bg-white dark:bg-slate-800">
                 <div className="text-center p-12">

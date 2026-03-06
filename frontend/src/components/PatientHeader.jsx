@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
+import { useNavigate, useLocation } from 'react-router-dom'
 import axios from 'axios'
-import { ChevronDown, UserCircle, LogOut } from 'lucide-react'
+import { ChevronDown, UserCircle, LogOut, ClipboardList } from 'lucide-react'
 import { cn } from '../lib/utils'
 import { useAuth } from '../auth/AuthContext'
 
@@ -13,6 +14,9 @@ export function PatientHeader({ patientId, onSelectPatient }) {
   const [searchTerm, setSearchTerm] = useState('')
   const [showSearchResults, setShowSearchResults] = useState(false)
   const { user, logout } = useAuth()
+  const navigate = useNavigate()
+  const location = useLocation()
+  const userRole = localStorage.getItem('user_role') || 'DOCTOR'
 
   // Filter patients based on search term
   const filteredPatients = allPatients.filter(p => {
@@ -168,6 +172,22 @@ export function PatientHeader({ patientId, onSelectPatient }) {
         )}
       </div>
       <div className='flex items-center gap-4'>
+        {/* TPA Queue Link - Only for MA Role */}
+        {userRole === 'MA' && (
+          <button
+            onClick={() => navigate('/tpa-queue')}
+            className={cn(
+              'flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-semibold transition-all shadow-sm',
+              location.pathname === '/tpa-queue'
+                ? 'bg-gradient-to-r from-emerald-600 to-teal-600 text-white'
+                : 'bg-white dark:bg-slate-800 text-slate-700 dark:text-slate-300 border border-slate-300 dark:border-slate-600 hover:bg-slate-50 dark:hover:bg-slate-700'
+            )}
+          >
+            <ClipboardList className='h-4 w-4' />
+            TPA Queue
+          </button>
+        )}
+        
         <div className='flex items-center gap-2 text-sm text-slate-700 dark:text-slate-300'>
           <UserCircle className='h-4 w-4' />
           <span>{user?.username || 'User'}</span>

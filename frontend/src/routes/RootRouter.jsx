@@ -2,6 +2,7 @@ import { Routes, Route, Navigate } from 'react-router-dom'
 import ProtectedRoute from '../auth/ProtectedRoute'
 import LoginPage from '../pages/LoginPage'
 import Dashboard from '../pages/Dashboard'
+import ActiveClaimsDashboard from '../pages/ActiveClaimsDashboard'
 
 export default function RootRouter() {
   return (
@@ -9,6 +10,7 @@ export default function RootRouter() {
       <Route path="/login" element={<LoginPage />} />
       <Route element={<ProtectedRoute />}> 
         <Route path="/" element={<Dashboard />} />
+        <Route path="/tpa-queue" element={<ActiveClaimsDashboard />} />
       </Route>
       {/* Catch-all: redirect unknown routes to login or dashboard based on auth could be added */}
       <Route path="*" element={<Navigate to="/" replace />} />

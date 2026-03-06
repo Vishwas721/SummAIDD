@@ -91,6 +91,8 @@ class ActiveClaimResponse(BaseModel):
     patient_id: int = Field(..., description="Internal patient ID")
     patient_demo_id: str = Field(..., description="External/non-PHI patient identifier")
     patient_display_name: str = Field(..., description="Patient display name")
+    patient_age: int | None = Field(default=None, description="Patient age")
+    patient_sex: str | None = Field(default=None, description="Patient sex (M/F/Unknown)")
     status: str = Field(..., description="Current claim status")
     discrepancies: Any = Field(default_factory=list, description="Validation discrepancies JSON payload")
     created_at: str | None = Field(default=None, description="Claim creation timestamp")
@@ -657,6 +659,8 @@ def get_active_claims():
                 c.patient_id,
                 p.patient_demo_id,
                 p.patient_display_name,
+                p.age,
+                p.sex,
                 c.status,
                 c.discrepancies,
                 c.created_at
@@ -676,9 +680,11 @@ def get_active_claims():
                 patient_id=row[1],
                 patient_demo_id=row[2],
                 patient_display_name=row[3],
-                status=row[4],
-                discrepancies=_normalize_discrepancies(row[5]),
-                created_at=row[6].isoformat() if row[6] else None,
+                patient_age=row[4],
+                patient_sex=row[5],
+                status=row[6],
+                discrepancies=_normalize_discrepancies(row[7]),
+                created_at=row[8].isoformat() if row[8] else None,
             )
             for row in rows
         ]

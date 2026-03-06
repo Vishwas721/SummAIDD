@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef, useCallback, Children } from 'react'
 import axios from 'axios'
-import { Sparkles, Loader2, AlertTriangle, CheckCircle2, ChevronLeft, ChevronRight, ExternalLink, X, Download, ShieldCheck, Upload } from 'lucide-react'
+import { Sparkles, Loader2, AlertTriangle, CheckCircle2, ChevronLeft, ChevronRight, ExternalLink, X, Download, ShieldCheck, Upload, AlertCircle } from 'lucide-react'
 import { cn } from '../lib/utils'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
@@ -16,7 +16,7 @@ pdfjs.GlobalWorkerOptions.workerSrc = new URL(
   import.meta.url
 ).toString()
 
-export function SummaryPanel({ patientId }) {
+export function SummaryPanel({ patientId, initialTab = 'summary' }) {
   console.log('🎨 SummaryPanel RENDER - patientId prop:', patientId, 'Type:', typeof patientId);
   
   const [summary, setSummary] = useState('')
@@ -31,7 +31,7 @@ export function SummaryPanel({ patientId }) {
   // Edit state for doctor to modify and save official summary
   const [editMode, setEditMode] = useState(false)
   const [editedText, setEditedText] = useState('')
-  const [maTab, setMaTab] = useState('summary') // 'summary' | 'reports' | 'insurance'
+  const [maTab, setMaTab] = useState(initialTab) // 'summary' | 'reports' | 'insurance'
   const [maReports, setMaReports] = useState([])
   const [reportsLoading, setReportsLoading] = useState(false)
   const [reportsError, setReportsError] = useState(null)
@@ -51,6 +51,9 @@ export function SummaryPanel({ patientId }) {
   const [claimUploadMeta, setClaimUploadMeta] = useState(null)
   const [claimStatusRecord, setClaimStatusRecord] = useState(null)
   const [selectedClaimFileName, setSelectedClaimFileName] = useState('')
+  const [patientClaims, setPatientClaims] = useState([])
+  const [patientClaimsLoading, setPatientClaimsLoading] = useState(false)
+  const [patientClaimsError, setPatientClaimsError] = useState(null)
 
   const claimPollIntervalRef = useRef(null)
   const claimFileInputRef = useRef(null)
@@ -116,6 +119,8 @@ export function SummaryPanel({ patientId }) {
       const statusValue = String(payload?.status || '').toUpperCase()
       if (terminalStates.has(statusValue)) {
         clearClaimPolling()
+        // Auto-refresh patient claims list to show updated traffic light status
+        fetchPatientClaims()
       }
     } catch (e) {
       const statusCode = e.response?.status
@@ -131,7 +136,7 @@ export function SummaryPanel({ patientId }) {
         setClaimStatusLoading(false)
       }
     }
-  }, [clearClaimPolling, patientId])
+  }, [clearClaimPolling, patientId, fetchPatientClaims])
 
   const startClaimPolling = useCallback((claimId) => {
     if (!claimId) return
@@ -198,6 +203,22 @@ const handleClaimFileUpload = useCallback(async (file) => {
     }
     event.target.value = ''
   }, [handleClaimFileUpload])
+
+  const fetchPatientClaims = useCallback(async () => {
+    if (!patientId || userRole !== 'MA') return
+    setPatientClaimsLoading(true)
+    setPatientClaimsError(null)
+    try {
+      const url = `${import.meta.env.VITE_API_URL}/tpa/claims/patient/${encodeURIComponent(patientId)}`
+      const response = await axios.get(url)
+      setPatientClaims(Array.isArray(response.data) ? response.data : [])
+    } catch (e) {
+      setPatientClaimsError(e.response?.data?.detail || e.message || 'Failed to load patient claims')
+      setPatientClaims([])
+    } finally {
+      setPatientClaimsLoading(false)
+    }
+  }, [patientId, userRole])
 
   useEffect(() => {
     isEditModeRef.current = editMode
@@ -293,7 +314,7 @@ const handleClaimFileUpload = useCallback(async (file) => {
     setError(null)
     setChartPrepared(false)
     setChiefComplaint('')
-    setMaTab('summary')
+    setMaTab(initialTab)  // Respect initialTab prop from routing state
     setMaReports([])
     setReportsError(null)
     setConsentError(null)
@@ -307,6 +328,9 @@ const handleClaimFileUpload = useCallback(async (file) => {
     setClaimUploadMeta(null)
     setClaimStatusRecord(null)
     setSelectedClaimFileName('')
+    setPatientClaims([])
+    setPatientClaimsLoading(false)
+    setPatientClaimsError(null)
     setDebugInfo(prev => ({ ...prev, status: 'reset', error: null }))
     clearClaimPolling()
 
@@ -362,7 +386,7 @@ const handleClaimFileUpload = useCallback(async (file) => {
     }
   }
 
-  const fetchConsentStatus = async () => {
+  const fetchConsentStatus = useCallback(async () => {
     if (!patientId || userRole !== 'MA') return
     setConsentLoading(true)
     setConsentError(null)
@@ -380,7 +404,7 @@ const handleClaimFileUpload = useCallback(async (file) => {
     } finally {
       setConsentLoading(false)
     }
-  }
+  }, [patientId, userRole])
 
   const handleRequestConsent = async () => {
     if (!patientId || !mobileNumber.trim()) return
@@ -427,8 +451,9 @@ const handleClaimFileUpload = useCallback(async (file) => {
     }
     if (maTab === 'insurance') {
       fetchConsentStatus()
+      fetchPatientClaims()
     }
-  }, [maTab, patientId, userRole])
+  }, [maTab, patientId, userRole, fetchConsentStatus, fetchPatientClaims])
 
   const handleSaveEditedSummary = async () => {
     if (!patientId) return
@@ -770,6 +795,128 @@ const handleClaimFileUpload = useCallback(async (file) => {
                           )}
                           {claimError && (
                             <p className="mt-1 text-xs text-red-600 dark:text-red-400">{claimError}</p>
+                          )}
+                        </div>
+                      )}
+                    </div>
+
+                    {/* Traffic Light Claim Status Display */}
+                    <div className="mt-6 p-4 rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-800">
+                      <div className="flex items-center justify-between mb-3">
+                        <p className="text-sm font-semibold text-slate-800 dark:text-slate-100">Claim Validation Status</p>
+                        <button
+                          onClick={fetchPatientClaims}
+                          disabled={patientClaimsLoading}
+                          className={cn(
+                            'px-2 py-1 rounded text-xs',
+                            patientClaimsLoading
+                              ? 'border-slate-200 text-slate-400 dark:border-slate-700 dark:text-slate-500 cursor-not-allowed'
+                              : 'border border-slate-300 text-slate-700 hover:bg-slate-100 dark:border-slate-600 dark:text-slate-200 dark:hover:bg-slate-800'
+                          )}
+                        >
+                          {patientClaimsLoading ? 'Refreshing...' : 'Refresh'}
+                        </button>
+                      </div>
+
+                      {patientClaimsLoading ? (
+                        <div className="flex items-center gap-2 text-xs text-slate-600 dark:text-slate-300 py-4">
+                          <Loader2 className="h-4 w-4 animate-spin" />
+                          <span>Loading claim history...</span>
+                        </div>
+                      ) : patientClaimsError ? (
+                        <div className="p-3 bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-800 rounded-md">
+                          <p className="text-xs text-red-700 dark:text-red-300">{patientClaimsError}</p>
+                        </div>
+                      ) : patientClaims.length === 0 ? (
+                        <div className="py-6 text-center">
+                          <p className="text-sm text-slate-500 dark:text-slate-400">No active claims</p>
+                          <p className="text-xs text-slate-400 dark:text-slate-500 mt-1">Upload a document to create a claim</p>
+                        </div>
+                      ) : (
+                        <div className="space-y-3">
+                          {patientClaims.slice(0, 1).map((claim) => {
+                            const statusUpper = String(claim.status || '').toUpperCase()
+                            const isRed = statusUpper === 'RED'
+                            const isYellow = statusUpper === 'YELLOW'
+                            const isGreen = statusUpper === 'GREEN'
+                            const isProcessing = statusUpper === 'PROCESSING'
+
+                            return (
+                              <div key={claim.claim_id} className="space-y-2">
+                                {/* Traffic Light Status Badge */}
+                                <div
+                                  className={cn(
+                                    'px-4 py-3 rounded-lg border-2 flex items-center gap-3',
+                                    isRed && 'bg-red-100 dark:bg-red-900/20 border-red-500 dark:border-red-700',
+                                    isYellow && 'bg-amber-100 dark:bg-amber-900/20 border-amber-500 dark:border-amber-700',
+                                    isGreen && 'bg-emerald-100 dark:bg-emerald-900/20 border-emerald-500 dark:border-emerald-700',
+                                    isProcessing && 'bg-slate-100 dark:bg-slate-800 border-slate-400 dark:border-slate-600'
+                                  )}
+                                >
+                                  <div
+                                    className={cn(
+                                      'h-8 w-8 rounded-full flex items-center justify-center',
+                                      isRed && 'bg-red-500 text-white',
+                                      isYellow && 'bg-amber-500 text-white',
+                                      isGreen && 'bg-emerald-500 text-white',
+                                      isProcessing && 'bg-slate-500 text-white'
+                                    )}
+                                  >
+                                    {isRed && <AlertCircle className="h-5 w-5" />}
+                                    {isYellow && <AlertTriangle className="h-5 w-5" />}
+                                    {isGreen && <CheckCircle2 className="h-5 w-5" />}
+                                    {isProcessing && <Loader2 className="h-5 w-5 animate-spin" />}
+                                  </div>
+                                  <div className="flex-1">
+                                    <p
+                                      className={cn(
+                                        'text-sm font-bold',
+                                        isRed && 'text-red-800 dark:text-red-300',
+                                        isYellow && 'text-amber-800 dark:text-amber-300',
+                                        isGreen && 'text-emerald-800 dark:text-emerald-300',
+                                        isProcessing && 'text-slate-700 dark:text-slate-300'
+                                      )}
+                                    >
+                                      {isRed ? 'Critical Error' : isYellow ? 'Warning - Action Required' : isGreen ? 'Clear2Go ✓' : 'Processing...'}
+                                    </p>
+                                    <p className="text-xs text-slate-600 dark:text-slate-400 mt-0.5">
+                                      Claim ID: {claim.claim_id} | {claim.created_at ? new Date(claim.created_at).toLocaleDateString() : 'N/A'}
+                                    </p>
+                                  </div>
+                                </div>
+
+                                {/* Discrepancy Cards for RED/YELLOW */}
+                                {(isRed || isYellow) && Array.isArray(claim.discrepancies) && claim.discrepancies.length > 0 && (
+                                  <div className="ml-2 pl-4 border-l-2 border-slate-300 dark:border-slate-700 space-y-2">
+                                    <p className="text-xs font-semibold text-slate-700 dark:text-slate-300 mb-2">Issues Found:</p>
+                                    {claim.discrepancies.map((discrepancy) => {
+                                      // Use hash of discrepancy string as stable key to prevent stale renders
+                                      const discrepancyStr = String(discrepancy)
+                                      const discrepancyKey = discrepancyStr.split('').reduce((hash, char) => {
+                                        return ((hash << 5) - hash) + char.charCodeAt(0)
+                                      }, 0)
+                                      
+                                      return (
+                                        <div
+                                          key={`discrepancy-${claim.claim_id}-${discrepancyKey}`}
+                                          className="p-2 rounded border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900"
+                                        >
+                                          <p className="text-xs text-slate-700 dark:text-slate-200">
+                                            {discrepancyStr}
+                                          </p>
+                                        </div>
+                                      )
+                                    })}
+                                  </div>
+                                )}
+                              </div>
+                            )
+                          })}
+
+                          {patientClaims.length > 1 && (
+                            <p className="text-xs text-slate-500 dark:text-slate-400 text-center pt-2">
+                              +{patientClaims.length - 1} older claim{patientClaims.length > 2 ? 's' : ''}
+                            </p>
                           )}
                         </div>
                       )}
