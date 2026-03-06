@@ -13,6 +13,7 @@ import requests
 from pydantic import BaseModel, Field
 from routers.patient_router import router as patient_router
 from routers.tpa_router import router as tpa_router
+from routers.audit_router import router as audit_router
 from db_utils import ensure_claim_document_support
 from schemas import AIResponseSchema, UniversalData, OncologyData, SpeechData
 from parallel_prompts import _generate_structured_summary_parallel
@@ -245,6 +246,7 @@ app.add_middleware(
 # Include sub-routers
 app.include_router(patient_router)
 app.include_router(tpa_router)
+app.include_router(audit_router)
 
 @app.get("/")
 async def health_check():
