@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef, useCallback, Children } from 'react'
 import axios from 'axios'
-import { Sparkles, Loader2, AlertTriangle, CheckCircle2, ChevronLeft, ChevronRight, ExternalLink, X, Download, ShieldCheck } from 'lucide-react'
+import { Sparkles, Loader2, AlertTriangle, CheckCircle2, ChevronLeft, ChevronRight, ExternalLink, X, Download, ShieldCheck, Upload } from 'lucide-react'
 import { cn } from '../lib/utils'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
@@ -44,6 +44,16 @@ export function SummaryPanel({ patientId }) {
   const [consentRecord, setConsentRecord] = useState(null)
   const [mobileNumber, setMobileNumber] = useState('')
   const [otpCode, setOtpCode] = useState('')
+  const [isDropzoneActive, setIsDropzoneActive] = useState(false)
+  const [claimUploading, setClaimUploading] = useState(false)
+  const [claimStatusLoading, setClaimStatusLoading] = useState(false)
+  const [claimError, setClaimError] = useState(null)
+  const [claimUploadMeta, setClaimUploadMeta] = useState(null)
+  const [claimStatusRecord, setClaimStatusRecord] = useState(null)
+  const [selectedClaimFileName, setSelectedClaimFileName] = useState('')
+
+  const claimPollIntervalRef = useRef(null)
+  const claimFileInputRef = useRef(null)
   
   console.log('🔍 Current state: summary length:', summary.length, 'generating:', generating, 'error:', error, 'chartPrepared:', chartPrepared);
   
@@ -82,6 +92,112 @@ export function SummaryPanel({ patientId }) {
   const pollIntervalRef = useRef(null)
   const isEditModeRef = useRef(false)
   const fetchPersistedSummaryRef = useRef(null)
+
+  const clearClaimPolling = useCallback(() => {
+    if (claimPollIntervalRef.current) {
+      clearInterval(claimPollIntervalRef.current)
+      claimPollIntervalRef.current = null
+    }
+  }, [])
+
+  const fetchClaimStatus = useCallback(async (claimId, { silent = false } = {}) => {
+    if (!claimId || !patientId) return
+    if (!silent) {
+      setClaimStatusLoading(true)
+      setClaimError(null)
+    }
+    try {
+      const url = `${import.meta.env.VITE_API_URL}/tpa/claim/${encodeURIComponent(claimId)}`
+      const response = await axios.get(url)
+      const payload = response.data || null
+      setClaimStatusRecord(payload)
+
+      const terminalStates = new Set(['RED', 'YELLOW', 'GREEN'])
+      const statusValue = String(payload?.status || '').toUpperCase()
+      if (terminalStates.has(statusValue)) {
+        clearClaimPolling()
+      }
+    } catch (e) {
+      const statusCode = e.response?.status
+      if (statusCode === 404) {
+        // Keep UI usable while backend status endpoint catches up.
+        setClaimError('Claim status endpoint not available yet. Use Refresh after backend update.')
+      } else {
+        setClaimError(e.response?.data?.detail || e.message || 'Failed to fetch claim status')
+      }
+      clearClaimPolling()
+    } finally {
+      if (!silent) {
+        setClaimStatusLoading(false)
+      }
+    }
+  }, [clearClaimPolling, patientId])
+
+  const startClaimPolling = useCallback((claimId) => {
+    if (!claimId) return
+    clearClaimPolling()
+    claimPollIntervalRef.current = setInterval(() => {
+      fetchClaimStatus(claimId, { silent: true })
+    }, 4000)
+  }, [clearClaimPolling, fetchClaimStatus])
+
+const handleClaimFileUpload = useCallback(async (file) => {
+    if (!file || !patientId || !consentRecord?.consent_status) return
+
+    const allowedTypes = new Set(['application/pdf', 'image/png', 'image/jpeg', 'image/jpg'])
+    const lowerName = String(file.name || '').toLowerCase()
+    const extensionAllowed = ['.pdf', '.png', '.jpg', '.jpeg'].some((ext) => lowerName.endsWith(ext))
+    
+    // STRICT OR: Reject if the MIME type is bad OR the extension is bad.
+    if (!allowedTypes.has((file.type || '').toLowerCase()) || !extensionAllowed) {
+      setClaimError('Please upload a PDF, PNG, JPG, or JPEG file.')
+      return
+    }
+
+    setClaimUploading(true)
+    setClaimError(null)
+    setSelectedClaimFileName(file.name || '')
+    setClaimStatusRecord(null)
+    setClaimUploadMeta(null)
+
+    const formData = new FormData()
+    formData.append('file', file)
+
+    try {
+      const url = `${import.meta.env.VITE_API_URL}/tpa/upload/${encodeURIComponent(patientId)}`
+      const response = await axios.post(url, formData, {
+        headers: { 'Content-Type': 'multipart/form-data' }
+      })
+      const payload = response.data || null
+      setClaimUploadMeta(payload)
+      setClaimStatusRecord(payload)
+      if (payload?.claim_id) {
+        fetchClaimStatus(payload.claim_id)
+        startClaimPolling(payload.claim_id)
+      }
+    } catch (e) {
+      setClaimError(e.response?.data?.detail || e.message || 'Claim upload failed')
+    } finally {
+      setClaimUploading(false)
+    }
+  }, [consentRecord?.consent_status, fetchClaimStatus, patientId, startClaimPolling])
+
+  const handleDropzoneDrop = useCallback((event) => {
+    event.preventDefault()
+    setIsDropzoneActive(false)
+    const droppedFile = event.dataTransfer?.files?.[0]
+    if (droppedFile) {
+      handleClaimFileUpload(droppedFile)
+    }
+  }, [handleClaimFileUpload])
+
+  const handleDropzoneFilePick = useCallback((event) => {
+    const pickedFile = event.target.files?.[0]
+    if (pickedFile) {
+      handleClaimFileUpload(pickedFile)
+    }
+    event.target.value = ''
+  }, [handleClaimFileUpload])
 
   useEffect(() => {
     isEditModeRef.current = editMode
@@ -184,7 +300,15 @@ export function SummaryPanel({ patientId }) {
     setConsentRecord(null)
     setMobileNumber('')
     setOtpCode('')
+    setIsDropzoneActive(false)
+    setClaimUploading(false)
+    setClaimStatusLoading(false)
+    setClaimError(null)
+    setClaimUploadMeta(null)
+    setClaimStatusRecord(null)
+    setSelectedClaimFileName('')
     setDebugInfo(prev => ({ ...prev, status: 'reset', error: null }))
+    clearClaimPolling()
 
     if (pollIntervalRef.current) {
       clearInterval(pollIntervalRef.current)
@@ -209,11 +333,18 @@ export function SummaryPanel({ patientId }) {
           clearInterval(pollIntervalRef.current)
           pollIntervalRef.current = null
         }
+        clearClaimPolling()
       }
     } else {
       console.log('❌ NOT fetching because userRole=' + userRole + ' patientId=' + patientId);
     }
-  }, [patientId, userRole, fetchPersistedSummary])
+  }, [patientId, userRole, fetchPersistedSummary, clearClaimPolling])
+
+  useEffect(() => {
+    return () => {
+      clearClaimPolling()
+    }
+  }, [clearClaimPolling])
 
   const fetchReportsForMA = async () => {
     if (!patientId || userRole !== 'MA') return
@@ -549,13 +680,99 @@ export function SummaryPanel({ patientId }) {
                     </button>
                   </div>
                 ) : consentRecord?.consent_status ? (
-                  <div className="p-6 bg-green-50 dark:bg-green-900/20 border border-green-300 dark:border-green-700 rounded-lg">
-                    <div className="flex items-start gap-3">
-                      <ShieldCheck className="h-6 w-6 text-green-600 dark:text-green-400 mt-0.5" />
-                      <div>
-                        <p className="text-sm font-bold text-green-700 dark:text-green-300">Consent Verified</p>
-                        <p className="text-xs text-green-600 dark:text-green-400 mt-1">Ready for Document Upload.</p>
+                  <div className="space-y-4">
+                    <div className="p-6 bg-green-50 dark:bg-green-900/20 border border-green-300 dark:border-green-700 rounded-lg">
+                      <div className="flex items-start gap-3">
+                        <ShieldCheck className="h-6 w-6 text-green-600 dark:text-green-400 mt-0.5" />
+                        <div>
+                          <p className="text-sm font-bold text-green-700 dark:text-green-300">Consent Verified</p>
+                          <p className="text-xs text-green-600 dark:text-green-400 mt-1">Ready for Document Upload.</p>
+                        </div>
                       </div>
+                    </div>
+
+                    <div className="p-4 rounded-lg border border-slate-300 dark:border-slate-700 bg-slate-50/70 dark:bg-slate-900/50">
+                      <p className="text-sm font-semibold text-slate-800 dark:text-slate-100 mb-1">Upload Claim Document</p>
+                      <p className="text-xs text-slate-500 dark:text-slate-400 mb-3">Drop a single file or click to browse. Supported: PDF, PNG, JPG.</p>
+
+                      <input
+                        ref={claimFileInputRef}
+                        type="file"
+                        accept=".pdf,.png,.jpg,.jpeg,application/pdf,image/png,image/jpeg"
+                        onChange={handleDropzoneFilePick}
+                        className="hidden"
+                      />
+
+                      <div
+                        onDragOver={(e) => {
+                          e.preventDefault()
+                          setIsDropzoneActive(true)
+                        }}
+                        onDragLeave={() => setIsDropzoneActive(false)}
+                        onDrop={handleDropzoneDrop}
+                        onClick={() => claimFileInputRef.current?.click()}
+                        className={cn(
+                          'rounded-md border-2 border-dashed px-4 py-8 text-center cursor-pointer transition-colors',
+                          isDropzoneActive
+                            ? 'border-slate-500 bg-slate-100 dark:border-slate-400 dark:bg-slate-800/60'
+                            : 'border-slate-300 bg-white dark:border-slate-700 dark:bg-slate-900/40',
+                          claimUploading && 'opacity-75 cursor-wait'
+                        )}
+                      >
+                        <div className="flex flex-col items-center gap-2">
+                          <Upload className="h-5 w-5 text-slate-500 dark:text-slate-400" />
+                          <p className="text-sm text-slate-700 dark:text-slate-200">Drag and drop file here</p>
+                          <p className="text-xs text-slate-500 dark:text-slate-400">or click to select</p>
+                        </div>
+                      </div>
+
+                      {(claimUploading || (claimStatusRecord?.status || '').toUpperCase() === 'PROCESSING') && (
+                        <div className="mt-3 flex items-center gap-2 text-xs text-slate-600 dark:text-slate-300">
+                          <span className="h-2 w-2 rounded-full bg-slate-500 animate-pulse" />
+                          <span>Validating Claim...</span>
+                        </div>
+                      )}
+
+                      {(selectedClaimFileName || claimUploadMeta?.claim_id) && (
+                        <div className="mt-3 flex items-center justify-between gap-2 text-xs text-slate-600 dark:text-slate-300">
+                          <div className="truncate">
+                            {selectedClaimFileName ? `File: ${selectedClaimFileName}` : 'File uploaded'}
+                            {claimUploadMeta?.claim_id ? ` | Claim ID: ${claimUploadMeta.claim_id}` : ''}
+                          </div>
+                          {claimUploadMeta?.claim_id && (
+                            <button
+                              onClick={() => fetchClaimStatus(claimUploadMeta.claim_id)}
+                              disabled={claimStatusLoading}
+                              className={cn(
+                                'px-2 py-1 rounded border text-xs',
+                                claimStatusLoading
+                                  ? 'border-slate-200 text-slate-400 dark:border-slate-700 dark:text-slate-500 cursor-not-allowed'
+                                  : 'border-slate-300 text-slate-700 hover:bg-slate-100 dark:border-slate-600 dark:text-slate-200 dark:hover:bg-slate-800'
+                              )}
+                            >
+                              {claimStatusLoading ? 'Refreshing...' : 'Refresh Status'}
+                            </button>
+                          )}
+                        </div>
+                      )}
+
+                      {(claimStatusRecord?.status || claimError) && (
+                        <div className="mt-3 rounded-md border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 px-3 py-2">
+                          {claimStatusRecord?.status && (
+                            <p className="text-xs text-slate-700 dark:text-slate-200">
+                              Current Status: <span className="font-semibold">{String(claimStatusRecord.status).toUpperCase()}</span>
+                            </p>
+                          )}
+                          {Array.isArray(claimStatusRecord?.discrepancies) && claimStatusRecord.discrepancies.length > 0 && (
+                            <p className="mt-1 text-xs text-slate-500 dark:text-slate-400">
+                              {claimStatusRecord.discrepancies.join(' | ')}
+                            </p>
+                          )}
+                          {claimError && (
+                            <p className="mt-1 text-xs text-red-600 dark:text-red-400">{claimError}</p>
+                          )}
+                        </div>
+                      )}
                     </div>
                   </div>
                 ) : (

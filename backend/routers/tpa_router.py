@@ -66,6 +66,15 @@ class ClaimUploadResponse(BaseModel):
     status: str = Field(..., description="Frontend processing status")
 
 
+class ClaimStatusResponse(BaseModel):
+    """Current claim processing status for polling/refresh."""
+    claim_id: int = Field(..., description="Insurance claim ID")
+    patient_id: int = Field(..., description="Patient ID linked to the claim")
+    status: str = Field(..., description="Current claim status")
+    discrepancies: list = Field(default_factory=list, description="Validation discrepancies")
+    created_at: str | None = Field(default=None, description="Claim creation timestamp")
+
+
 # ============================================================================
 # ENDPOINTS
 # ============================================================================
@@ -521,3 +530,43 @@ def get_consent_status(patient_id: int):
             status_code=500,
             detail=f"Database error while retrieving consent: {str(e)}"
         )
+
+
+@router.get("/claim/{claim_id}", response_model=ClaimStatusResponse)
+def get_claim_status(claim_id: int):
+    """Get current claim status for frontend refresh/polling."""
+    conn = None
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor()
+        cur.execute(
+            """
+            SELECT claim_id, patient_id, status, discrepancies, created_at
+            FROM insurance_claims
+            WHERE claim_id = %s
+            """,
+            (claim_id,),
+        )
+        row = cur.fetchone()
+        cur.close()
+        conn.close()
+
+        if not row:
+            raise HTTPException(status_code=404, detail=f"Claim with ID {claim_id} not found")
+
+        discrepancies = row[3] if row[3] is not None else []
+        created_at = row[4].isoformat() if row[4] else None
+        return ClaimStatusResponse(
+            claim_id=row[0],
+            patient_id=row[1],
+            status=row[2],
+            discrepancies=discrepancies,
+            created_at=created_at,
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        if conn:
+            conn.close()
+        logger.exception(f"Error retrieving claim status for claim {claim_id}")
+        raise HTTPException(status_code=500, detail=f"Database error while retrieving claim status: {str(e)}")
