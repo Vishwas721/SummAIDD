@@ -10,6 +10,7 @@ Functions:
 
 import os
 import logging
+import json
 from typing import List, Dict, Optional
 import psycopg2
 from psycopg2.extras import RealDictCursor
@@ -244,6 +245,226 @@ def get_report_types_for_patient(patient_id: int) -> List[str]:
         
     except psycopg2.Error as e:
         logger.error(f"Database error while retrieving report types: {e}")
+        raise
+    finally:
+        if conn:
+            conn.close()
+
+
+# =============================================================================
+# TPA CLAIM INGESTION HELPERS (PHASE 2)
+# =============================================================================
+
+def _get_encryption_key() -> str:
+    """Return sanitized encryption key from environment."""
+    encryption_key = os.getenv("ENCRYPTION_KEY")
+    if not encryption_key:
+        raise ValueError("ENCRYPTION_KEY environment variable is not set")
+
+    encryption_key = encryption_key.strip()
+    if len(encryption_key) >= 2 and (
+        (encryption_key[0] == '"' and encryption_key[-1] == '"') or
+        (encryption_key[0] == "'" and encryption_key[-1] == "'")
+    ):
+        encryption_key = encryption_key[1:-1]
+    return encryption_key
+
+
+def ensure_claim_document_support() -> None:
+    """
+    Ensure claim ingestion schema objects exist.
+
+    Creates claim_documents table linked to insurance_claims and indexes if missing.
+    Safe to call repeatedly.
+    """
+    conn = None
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor()
+
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS claim_documents (
+                document_id SERIAL PRIMARY KEY,
+                claim_id INTEGER NOT NULL REFERENCES insurance_claims(claim_id) ON DELETE CASCADE,
+                filename TEXT NOT NULL,
+                mime_type TEXT NOT NULL,
+                extracted_text_encrypted BYTEA NOT NULL,
+                created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+            )
+            """
+        )
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_claim_documents_claim_id ON claim_documents(claim_id)")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_claim_documents_created_at ON claim_documents(created_at DESC)")
+
+        conn.commit()
+        cur.close()
+    except Exception as e:
+        if conn:
+            conn.rollback()
+        logger.error(f"Failed to ensure claim document support: {e}")
+        raise
+    finally:
+        if conn:
+            conn.close()
+
+
+def create_claim_with_document(patient_id: int, filename: str, mime_type: str, extracted_text: str) -> int:
+    """
+    Create insurance claim (PENDING) and store encrypted extracted text document.
+
+    Returns:
+        claim_id for newly created claim
+    """
+    conn = None
+    encryption_key = _get_encryption_key()
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor()
+
+        # Ensure patient exists
+        cur.execute("SELECT patient_id FROM patients WHERE patient_id = %s", (patient_id,))
+        if not cur.fetchone():
+            raise ValueError(f"Patient with ID {patient_id} not found")
+
+        # Create claim in pending state
+        cur.execute(
+            """
+            INSERT INTO insurance_claims (patient_id, status, discrepancies)
+            VALUES (%s, 'PENDING', %s::jsonb)
+            RETURNING claim_id
+            """,
+            (patient_id, json.dumps({}))
+        )
+        claim_id = cur.fetchone()[0]
+
+        # Store encrypted extracted text
+        cur.execute(
+            """
+            INSERT INTO claim_documents (claim_id, filename, mime_type, extracted_text_encrypted)
+            VALUES (%s, %s, %s, pgp_sym_encrypt(%s, %s))
+            """,
+            (claim_id, filename, mime_type, extracted_text, encryption_key)
+        )
+
+        conn.commit()
+        cur.close()
+        return claim_id
+    except Exception:
+        if conn:
+            conn.rollback()
+        raise
+    finally:
+        if conn:
+            conn.close()
+
+
+def create_claim_record(patient_id: int, status: str = "PENDING", discrepancies: Optional[Dict] = None) -> int:
+    """
+    Create a parent insurance claim row and return claim_id.
+
+    This intentionally does NOT write claim_documents; child ingestion can happen later.
+    """
+    conn = None
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor()
+
+        cur.execute("SELECT patient_id FROM patients WHERE patient_id = %s", (patient_id,))
+        if not cur.fetchone():
+            raise ValueError(f"Patient with ID {patient_id} not found")
+
+        cur.execute(
+            """
+            INSERT INTO insurance_claims (patient_id, status, discrepancies)
+            VALUES (%s, %s, %s::jsonb)
+            RETURNING claim_id
+            """,
+            (patient_id, status, json.dumps(discrepancies or {}))
+        )
+        claim_id = cur.fetchone()[0]
+        conn.commit()
+        cur.close()
+        return claim_id
+    except Exception:
+        if conn:
+            conn.rollback()
+        raise
+    finally:
+        if conn:
+            conn.close()
+
+
+def insert_claim_document_encrypted(claim_id: int, filename: str, mime_type: str, extracted_text: str) -> None:
+    """Insert encrypted child claim document row linked to an existing claim."""
+    conn = None
+    encryption_key = _get_encryption_key()
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor()
+        cur.execute(
+            """
+            INSERT INTO claim_documents (claim_id, filename, mime_type, extracted_text_encrypted)
+            VALUES (%s, %s, %s, pgp_sym_encrypt(%s, %s))
+            """,
+            (claim_id, filename, mime_type, extracted_text, encryption_key)
+        )
+        conn.commit()
+        cur.close()
+    except Exception:
+        if conn:
+            conn.rollback()
+        raise
+    finally:
+        if conn:
+            conn.close()
+
+
+def get_decrypted_claim_document_text(claim_id: int) -> str:
+    """Fetch and decrypt the latest claim document text for a claim."""
+    conn = None
+    encryption_key = _get_encryption_key()
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor()
+        cur.execute(
+            """
+            SELECT pgp_sym_decrypt(extracted_text_encrypted, %s)::text
+            FROM claim_documents
+            WHERE claim_id = %s
+            ORDER BY created_at DESC, document_id DESC
+            LIMIT 1
+            """,
+            (encryption_key, claim_id)
+        )
+        row = cur.fetchone()
+        cur.close()
+        return row[0] if row and row[0] else ""
+    finally:
+        if conn:
+            conn.close()
+
+
+def update_claim_status(claim_id: int, status: str, discrepancies: Optional[Dict] = None) -> None:
+    """Update insurance claim status and discrepancies payload."""
+    conn = None
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor()
+        cur.execute(
+            """
+            UPDATE insurance_claims
+            SET status = %s,
+                discrepancies = %s::jsonb
+            WHERE claim_id = %s
+            """,
+            (status, json.dumps(discrepancies or {}), claim_id)
+        )
+        conn.commit()
+        cur.close()
+    except Exception:
+        if conn:
+            conn.rollback()
         raise
     finally:
         if conn:

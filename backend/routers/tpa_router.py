@@ -7,17 +7,31 @@ Endpoints handle consent requests, OTP verification, and status checks.
 """
 
 import os
+import io
 import logging
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, UploadFile, File, BackgroundTasks
 from pydantic import BaseModel, Field
 from database import get_db_connection
 from schemas import PatientConsentResponse
+from db_utils import (
+    create_claim_record,
+    insert_claim_document_encrypted,
+    update_claim_status,
+)
 
 router = APIRouter(prefix="/tpa", tags=["TPA Consent"])
 logger = logging.getLogger(__name__)
 
 # Encryption key for mobile number storage
 ENCRYPTION_KEY = os.getenv("ENCRYPTION_KEY", "").strip()
+
+ALLOWED_CONTENT_TYPES = {
+    "application/pdf",
+    "image/png",
+    "image/jpeg",
+    "image/jpg",
+}
+ALLOWED_EXTENSIONS = {".pdf", ".png", ".jpg", ".jpeg"}
 
 
 # ============================================================================
@@ -44,9 +58,166 @@ class OTPVerificationBody(BaseModel):
     )
 
 
+class ClaimUploadResponse(BaseModel):
+    """Immediate response after claim upload acceptance."""
+    claim_id: int = Field(..., description="Created insurance claim ID")
+    status: str = Field(..., description="Frontend processing status")
+
+
 # ============================================================================
 # ENDPOINTS
 # ============================================================================
+
+def _normalize_extracted_text(text: str) -> str:
+    """Normalize extracted PDF/OCR text for cleaner downstream validation."""
+    if not text:
+        return ""
+    normalized = text.replace("\r\n", "\n").replace("\r", "\n")
+    normalized = "\n".join(" ".join(line.split()) for line in normalized.split("\n"))
+    return normalized.strip()
+
+
+def _extract_text_from_pdf(data: bytes) -> str:
+    """Extract text from PDF bytes using PyMuPDF."""
+    import fitz
+
+    doc = fitz.open(stream=data, filetype="pdf")
+    pages = []
+    for page_index in range(doc.page_count):
+        page = doc.load_page(page_index)
+        pages.append(page.get_text() or "")
+    doc.close()
+    return _normalize_extracted_text("\n\n".join(pages))
+
+
+def _extract_text_from_image(data: bytes) -> str:
+    """Extract text from image bytes using pytesseract OCR."""
+    import pytesseract
+    from PIL import Image
+
+    img = Image.open(io.BytesIO(data))
+    text = pytesseract.image_to_string(img) or ""
+    return _normalize_extracted_text(text)
+
+
+def _run_claim_document_ingestion_task(
+    claim_id: int,
+    filename: str,
+    mime_type: str,
+    file_bytes: bytes,
+    is_pdf: bool,
+) -> None:
+    """
+    Background ingestion + validation placeholder for Phase 2.
+
+    Heavy OCR/PDF extraction is intentionally done here to keep upload endpoint responsive.
+    """
+    try:
+        extracted_text = _extract_text_from_pdf(file_bytes) if is_pdf else _extract_text_from_image(file_bytes)
+
+        if not extracted_text or len(extracted_text) < 20:
+            update_claim_status(
+                claim_id,
+                "RED",
+                {"document_text": "Insufficient extractable text found in uploaded claim document"},
+            )
+            logger.warning(f"[TPA VALIDATION] claim_id={claim_id} flagged RED (insufficient text)")
+            return
+
+        insert_claim_document_encrypted(
+            claim_id=claim_id,
+            filename=filename,
+            mime_type=mime_type,
+            extracted_text=extracted_text,
+        )
+
+        # Phase 2 placeholder: mark as GREEN when text is available.
+        update_claim_status(claim_id, "GREEN", {})
+        logger.info(f"[TPA VALIDATION] claim_id={claim_id} completed with GREEN status")
+    except Exception as e:
+        logger.exception(f"[TPA VALIDATION] background task failed for claim_id={claim_id}: {e}")
+        try:
+            update_claim_status(claim_id, "RED", {"system_error": str(e)})
+        except Exception:
+            logger.exception(f"[TPA VALIDATION] failed to set RED fallback for claim_id={claim_id}")
+
+
+def _patient_has_verified_consent(patient_id: int) -> bool:
+    """Return True only when patient has a verified consent record."""
+    conn = None
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor()
+        cur.execute(
+            """
+            SELECT consent_status
+            FROM patient_consents
+            WHERE patient_id = %s
+            ORDER BY requested_at DESC, consent_id DESC
+            LIMIT 1
+            """,
+            (patient_id,),
+        )
+        row = cur.fetchone()
+        cur.close()
+        return bool(row and row[0] is True)
+    finally:
+        if conn:
+            conn.close()
+
+
+@router.post("/upload/{patient_id}", response_model=ClaimUploadResponse)
+def upload_claim_document(
+    patient_id: int,
+    background_tasks: BackgroundTasks,
+    file: UploadFile = File(..., description="Insurance claim document (PDF/JPG/PNG)"),
+):
+    """
+    Ingest an insurance claim document, encrypt extracted text at rest, and trigger async validation.
+
+    Returns immediately with claim_id while validation proceeds in a background task.
+    """
+    filename = file.filename or "uploaded_claim_document"
+    suffix = os.path.splitext(filename)[1].lower()
+    content_type = (file.content_type or "").lower()
+
+    if content_type not in ALLOWED_CONTENT_TYPES or suffix not in ALLOWED_EXTENSIONS:
+        raise HTTPException(status_code=400, detail="Only PDF, JPG, JPEG, or PNG files are allowed")
+
+    if not _patient_has_verified_consent(patient_id):
+        raise HTTPException(
+            status_code=403,
+            detail="Patient consent is required before uploading claim documents",
+        )
+
+    try:
+        file_bytes = file.file.read()
+        if not file_bytes:
+            raise HTTPException(status_code=400, detail="Uploaded file is empty")
+
+        is_pdf = content_type == "application/pdf" or suffix == ".pdf"
+        mime = content_type or "application/octet-stream"
+
+        # Parent claim row is created first, then heavy extraction + child insert run in background.
+        claim_id = create_claim_record(patient_id=patient_id, status="PENDING", discrepancies={})
+
+        background_tasks.add_task(
+            _run_claim_document_ingestion_task,
+            claim_id,
+            filename,
+            mime,
+            file_bytes,
+            is_pdf,
+        )
+
+        return ClaimUploadResponse(claim_id=claim_id, status="PROCESSING")
+    except HTTPException:
+        raise
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except Exception as e:
+        logger.exception(f"Error uploading claim document for patient {patient_id}")
+        raise HTTPException(status_code=500, detail=f"Claim upload failed: {e}")
 
 @router.post("/consent/{patient_id}", response_model=PatientConsentResponse)
 def request_consent(patient_id: int, body: ConsentRequestBody):
