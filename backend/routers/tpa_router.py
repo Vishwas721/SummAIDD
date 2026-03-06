@@ -10,6 +10,7 @@ import os
 import io
 import asyncio
 import logging
+from typing import Any
 from fastapi import APIRouter, HTTPException, UploadFile, File, BackgroundTasks
 from pydantic import BaseModel, Field
 from database import get_db_connection
@@ -72,6 +73,26 @@ class ClaimStatusResponse(BaseModel):
     patient_id: int = Field(..., description="Patient ID linked to the claim")
     status: str = Field(..., description="Current claim status")
     discrepancies: list = Field(default_factory=list, description="Validation discrepancies")
+    created_at: str | None = Field(default=None, description="Claim creation timestamp")
+
+
+class PatientClaimResponse(BaseModel):
+    """Claim item for patient-level claim retrieval."""
+    claim_id: int = Field(..., description="Insurance claim ID")
+    patient_id: int = Field(..., description="Patient ID linked to claim")
+    status: str = Field(..., description="Current claim status")
+    discrepancies: Any = Field(default_factory=list, description="Validation discrepancies JSON payload")
+    created_at: str | None = Field(default=None, description="Claim creation timestamp")
+
+
+class ActiveClaimResponse(BaseModel):
+    """Claim item for active-claims dashboard including patient demographics."""
+    claim_id: int = Field(..., description="Insurance claim ID")
+    patient_id: int = Field(..., description="Internal patient ID")
+    patient_demo_id: str = Field(..., description="External/non-PHI patient identifier")
+    patient_display_name: str = Field(..., description="Patient display name")
+    status: str = Field(..., description="Current claim status")
+    discrepancies: Any = Field(default_factory=list, description="Validation discrepancies JSON payload")
     created_at: str | None = Field(default=None, description="Claim creation timestamp")
 
 
@@ -177,6 +198,15 @@ def _patient_has_verified_consent(patient_id: int) -> bool:
     finally:
         if conn:
             conn.close()
+
+
+def _normalize_discrepancies(payload: Any) -> Any:
+    """Ensure discrepancies is JSON-serializable and frontend-safe."""
+    if payload is None:
+        return []
+    if isinstance(payload, (list, dict)):
+        return payload
+    return [str(payload)]
 
 
 @router.post("/upload/{patient_id}", response_model=ClaimUploadResponse)
@@ -570,3 +600,90 @@ def get_claim_status(claim_id: int):
             conn.close()
         logger.exception(f"Error retrieving claim status for claim {claim_id}")
         raise HTTPException(status_code=500, detail=f"Database error while retrieving claim status: {str(e)}")
+
+
+@router.get("/claims/patient/{patient_id}", response_model=list[PatientClaimResponse])
+def get_claims_for_patient(patient_id: int):
+    """Return all claims for a patient ordered by newest first."""
+    conn = None
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor()
+        cur.execute(
+            """
+            SELECT claim_id, patient_id, status, discrepancies, created_at
+            FROM insurance_claims
+            WHERE patient_id = %s
+            ORDER BY created_at DESC, claim_id DESC
+            """,
+            (patient_id,),
+        )
+        rows = cur.fetchall()
+        cur.close()
+        conn.close()
+
+        return [
+            PatientClaimResponse(
+                claim_id=row[0],
+                patient_id=row[1],
+                status=row[2],
+                discrepancies=_normalize_discrepancies(row[3]),
+                created_at=row[4].isoformat() if row[4] else None,
+            )
+            for row in rows
+        ]
+    except Exception as e:
+        if conn:
+            conn.close()
+        logger.exception(f"Error retrieving claims for patient {patient_id}")
+        raise HTTPException(status_code=500, detail=f"Database error while retrieving patient claims: {str(e)}")
+
+
+@router.get("/claims/active", response_model=list[ActiveClaimResponse])
+def get_active_claims():
+    """
+    Return active claims for dashboard triage.
+
+    FR-11: oldest first; include all non-GREEN statuses (including PROCESSING).
+    """
+    conn = None
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor()
+        cur.execute(
+            """
+            SELECT
+                c.claim_id,
+                c.patient_id,
+                p.patient_demo_id,
+                p.patient_display_name,
+                c.status,
+                c.discrepancies,
+                c.created_at
+            FROM insurance_claims c
+            JOIN patients p ON p.patient_id = c.patient_id
+            WHERE (c.status <> 'GREEN' OR c.status = 'PROCESSING')
+            ORDER BY c.created_at ASC, c.claim_id ASC
+            """
+        )
+        rows = cur.fetchall()
+        cur.close()
+        conn.close()
+
+        return [
+            ActiveClaimResponse(
+                claim_id=row[0],
+                patient_id=row[1],
+                patient_demo_id=row[2],
+                patient_display_name=row[3],
+                status=row[4],
+                discrepancies=_normalize_discrepancies(row[5]),
+                created_at=row[6].isoformat() if row[6] else None,
+            )
+            for row in rows
+        ]
+    except Exception as e:
+        if conn:
+            conn.close()
+        logger.exception("Error retrieving active claims")
+        raise HTTPException(status_code=500, detail=f"Database error while retrieving active claims: {str(e)}")
