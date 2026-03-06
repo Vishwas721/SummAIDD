@@ -1,7 +1,7 @@
 import psycopg2
 
 conn = psycopg2.connect(
-    dbname='summaid',
+    dbname='summaiddb',
     user='postgres',
     password='1234',
     host='localhost',

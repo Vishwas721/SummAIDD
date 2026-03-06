@@ -19,7 +19,7 @@ def _sanitize_key(key: str) -> str:
 ENCRYPTION_KEY = _sanitize_key(ENCRYPTION_KEY)
 
 # Database connection
-conn = psycopg2.connect('dbname=summaid user=postgres password=1234 host=localhost port=5432')
+conn = psycopg2.connect('dbname=summaiddb user=postgres password=1234 host=localhost port=5432')
 
 patient_id = 5
 

@@ -9,7 +9,7 @@ conn = psycopg2.connect(
     port=5432,
     user="postgres",
     password="1234",
-    dbname="summaid"
+    dbname="summaiddb"
 )
 
 # Read migration file

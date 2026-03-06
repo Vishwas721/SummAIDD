@@ -1,6 +1,6 @@
 import psycopg2
 
-conn = psycopg2.connect('dbname=summaid user=postgres password=1234 host=localhost port=5432')
+conn = psycopg2.connect('dbname=summaiddb user=postgres password=1234 host=localhost port=5432')
 cur = conn.cursor()
 
 print("=== Chunk 57 (FINDINGS with bilobed) ===")
