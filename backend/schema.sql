@@ -58,3 +58,33 @@ CREATE TABLE insurance_claims (
 CREATE INDEX idx_patient_consents_patient_id ON patient_consents(patient_id);
 CREATE INDEX idx_insurance_claims_patient_id ON insurance_claims(patient_id);
 CREATE INDEX idx_insurance_claims_status ON insurance_claims(status);
+
+-- ============================================================================
+-- EPIC 4.1: WORM Audit Logging (Write Once, Read Many)
+-- ============================================================================
+
+-- Audit Log Table - Immutable tracking of all doctor interactions
+CREATE TABLE audit_logs (
+    log_id SERIAL PRIMARY KEY,
+    patient_id INTEGER NOT NULL REFERENCES patients(patient_id) ON DELETE CASCADE,
+    user_id TEXT NOT NULL,  -- doctor/MA username
+    action_type TEXT NOT NULL CHECK (action_type IN ('VIEWED_SUMMARY', 'CLICKED_CITATION', 'PRESCRIBED_DRUG', 'EXPORTED_PDF', 'OVERRODE_ALERT')),
+    action_metadata JSONB,  -- flexible context: {citation_id, drug_name, pdf_url, etc.}
+    created_at TIMESTAMPTZ DEFAULT NOW() NOT NULL
+);
+
+CREATE INDEX idx_audit_logs_patient ON audit_logs(patient_id);
+CREATE INDEX idx_audit_logs_created ON audit_logs(created_at DESC);
+
+-- Alert Override Table - Justification for overriding allergy alerts
+CREATE TABLE alert_overrides (
+    override_id SERIAL PRIMARY KEY,
+    patient_id INTEGER NOT NULL REFERENCES patients(patient_id) ON DELETE CASCADE,
+    drug_name TEXT NOT NULL,
+    allergy_keyword TEXT NOT NULL,  -- the specific allergy substring that triggered the alert
+    doctor_reason TEXT NOT NULL,  -- why the override was justified
+    overridden_by TEXT NOT NULL,  -- doctor username
+    created_at TIMESTAMPTZ DEFAULT NOW() NOT NULL
+);
+
+CREATE INDEX idx_alert_overrides_patient ON alert_overrides(patient_id);

@@ -56,9 +56,10 @@ FRONTEND CONSUMPTION:
     {summary.speech && <SpeechCard data={summary.speech} />}
 """
 
-from typing import List, Optional, Dict, Any
+from typing import List, Optional, Dict, Any, Union, Literal
 from pydantic import BaseModel, Field, validator
 from datetime import date, datetime
+from enum import Enum
 
 
 # ============================================================================
@@ -484,6 +485,107 @@ class InsuranceClaimResponse(BaseModel):
 
 
 # ============================================================================
+# EPIC 4.1: WORM AUDIT LOGGING SCHEMAS
+# ============================================================================
+
+class AuditActionType(str, Enum):
+    """
+    Enumeration of valid audit log action types.
+    Enforces strict validation for WORM compliance.
+    """
+    VIEWED_SUMMARY = "VIEWED_SUMMARY"
+    CLICKED_CITATION = "CLICKED_CITATION"
+    PRESCRIBED_DRUG = "PRESCRIBED_DRUG"
+    EXPORTED_PDF = "EXPORTED_PDF"
+    OVERRODE_ALERT = "OVERRODE_ALERT"
+
+
+class AuditLogCreate(BaseModel):
+    """
+    Schema for creating a new audit log entry.
+    Tracks all doctor interactions with patient charts for compliance.
+    """
+    patient_id: int = Field(..., description="Patient ID")
+    user_id: str = Field(..., description="Username of the user performing the action")
+    action_type: AuditActionType = Field(
+        ...,
+        description="Type of action: VIEWED_SUMMARY, CLICKED_CITATION, PRESCRIBED_DRUG, EXPORTED_PDF, OVERRODE_ALERT"
+    )
+    action_metadata: Optional[Dict[str, Any]] = Field(
+        None,
+        description="Additional context for the action (e.g., citation_id, drug_name, pdf_url)"
+    )
+    
+    class Config:
+        from_attributes = True
+        json_schema_extra = {
+            "example": {
+                "patient_id": 1,
+                "user_id": "dr_smith",
+                "action_type": "PRESCRIBED_DRUG",
+                "action_metadata": {"drug_name": "Lisinopril", "dosage": "10mg"}
+            }
+        }
+
+
+class AuditLogResponse(BaseModel):
+    """
+    Schema for audit log data returned from database.
+    Immutable record of doctor actions.
+    """
+    log_id: int = Field(..., description="Unique audit log ID")
+    patient_id: int = Field(..., description="Patient ID")
+    user_id: str = Field(..., description="Username of the user")
+    action_type: AuditActionType = Field(..., description="Action type performed")
+    action_metadata: Optional[Dict[str, Any]] = Field(None, description="Action context")
+    created_at: datetime = Field(..., description="Timestamp when action occurred")
+    
+    class Config:
+        from_attributes = True
+
+
+class AlertOverrideCreate(BaseModel):
+    """
+    Schema for creating an allergy alert override.
+    Captures doctor justification when prescribing against known allergies.
+    """
+    patient_id: int = Field(..., description="Patient ID")
+    drug_name: str = Field(..., description="Name of the drug being prescribed")
+    allergy_keyword: str = Field(..., description="Allergy substring that triggered the alert")
+    doctor_reason: str = Field(..., description="Doctor's justification for overriding the allergy alert")
+    overridden_by: str = Field(..., description="Username of the doctor overriding the alert")
+    
+    class Config:
+        from_attributes = True
+        json_schema_extra = {
+            "example": {
+                "patient_id": 1,
+                "drug_name": "Penicillin",
+                "allergy_keyword": "penicillin",
+                "doctor_reason": "Patient tolerance test completed successfully; informed consent documented",
+                "overridden_by": "dr_smith"
+            }
+        }
+
+
+class AlertOverrideResponse(BaseModel):
+    """
+    Schema for alert override data returned from database.
+    Permanent record of allergy alert overrides.
+    """
+    override_id: int = Field(..., description="Unique override ID")
+    patient_id: int = Field(..., description="Patient ID")
+    drug_name: str = Field(..., description="Prescribed drug name")
+    allergy_keyword: str = Field(..., description="Allergy trigger keyword")
+    doctor_reason: str = Field(..., description="Override justification")
+    overridden_by: str = Field(..., description="Doctor username")
+    created_at: datetime = Field(..., description="Timestamp when override was created")
+    
+    class Config:
+        from_attributes = True
+
+
+# ============================================================================
 # EXPORT ALL SCHEMAS
 # ============================================================================
 
@@ -508,4 +610,11 @@ __all__ = [
     "PatientConsentCreate",
     "PatientConsentResponse",
     "InsuranceClaimResponse",
+    
+    # Audit Logging (Epic 4.1)
+    "AuditActionType",
+    "AuditLogCreate",
+    "AuditLogResponse",
+    "AlertOverrideCreate",
+    "AlertOverrideResponse",
 ]
