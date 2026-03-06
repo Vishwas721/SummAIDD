@@ -95,6 +95,7 @@ export function SummaryPanel({ patientId, initialTab = 'summary' }) {
   const pollIntervalRef = useRef(null)
   const isEditModeRef = useRef(false)
   const fetchPersistedSummaryRef = useRef(null)
+  const fetchPatientClaimsRef = useRef(null)
 
   const clearClaimPolling = useCallback(() => {
     if (claimPollIntervalRef.current) {
@@ -120,7 +121,9 @@ export function SummaryPanel({ patientId, initialTab = 'summary' }) {
       if (terminalStates.has(statusValue)) {
         clearClaimPolling()
         // Auto-refresh patient claims list to show updated traffic light status
-        fetchPatientClaims()
+        if (fetchPatientClaimsRef.current) {
+          fetchPatientClaimsRef.current()
+        }
       }
     } catch (e) {
       const statusCode = e.response?.status
@@ -136,7 +139,7 @@ export function SummaryPanel({ patientId, initialTab = 'summary' }) {
         setClaimStatusLoading(false)
       }
     }
-  }, [clearClaimPolling, patientId, fetchPatientClaims])
+  }, [clearClaimPolling, patientId])
 
   const startClaimPolling = useCallback((claimId) => {
     if (!claimId) return
@@ -219,6 +222,10 @@ const handleClaimFileUpload = useCallback(async (file) => {
       setPatientClaimsLoading(false)
     }
   }, [patientId, userRole])
+
+  useEffect(() => {
+    fetchPatientClaimsRef.current = fetchPatientClaims
+  }, [fetchPatientClaims])
 
   useEffect(() => {
     isEditModeRef.current = editMode

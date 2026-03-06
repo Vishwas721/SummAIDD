@@ -9,6 +9,7 @@ Endpoints handle consent requests, OTP verification, and status checks.
 import os
 import io
 import asyncio
+import json
 import logging
 from typing import Any
 from fastapi import APIRouter, HTTPException, UploadFile, File, BackgroundTasks
@@ -202,12 +203,34 @@ def _patient_has_verified_consent(patient_id: int) -> bool:
             conn.close()
 
 
-def _normalize_discrepancies(payload: Any) -> Any:
-    """Ensure discrepancies is JSON-serializable and frontend-safe."""
+def _normalize_discrepancies(payload: Any) -> list[str]:
+    """Normalize discrepancies to a list of display-safe strings."""
     if payload is None:
         return []
-    if isinstance(payload, (list, dict)):
-        return payload
+
+    if isinstance(payload, list):
+        return [str(item) for item in payload if str(item).strip()]
+
+    if isinstance(payload, dict):
+        if not payload:
+            return []
+
+        nested = payload.get("discrepancies")
+        if isinstance(nested, list):
+            return [str(item) for item in nested if str(item).strip()]
+
+        return [f"{key}: {value}" for key, value in payload.items()]
+
+    if isinstance(payload, str):
+        text = payload.strip()
+        if not text:
+            return []
+        try:
+            decoded = json.loads(text)
+            return _normalize_discrepancies(decoded)
+        except Exception:
+            return [text]
+
     return [str(payload)]
 
 
@@ -586,7 +609,7 @@ def get_claim_status(claim_id: int):
         if not row:
             raise HTTPException(status_code=404, detail=f"Claim with ID {claim_id} not found")
 
-        discrepancies = row[3] if row[3] is not None else []
+        discrepancies = _normalize_discrepancies(row[3])
         created_at = row[4].isoformat() if row[4] else None
         return ClaimStatusResponse(
             claim_id=row[0],
