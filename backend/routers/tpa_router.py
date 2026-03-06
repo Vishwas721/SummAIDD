@@ -8,12 +8,10 @@ Endpoints handle consent requests, OTP verification, and status checks.
 
 import os
 import logging
-from typing import Optional
-from datetime import datetime
-from fastapi import APIRouter, HTTPException, Body
+from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 from database import get_db_connection
-from schemas import PatientConsentCreate, PatientConsentResponse
+from schemas import PatientConsentResponse
 
 router = APIRouter(prefix="/tpa", tags=["TPA Consent"])
 logger = logging.getLogger(__name__)
@@ -51,7 +49,7 @@ class OTPVerificationBody(BaseModel):
 # ============================================================================
 
 @router.post("/consent/{patient_id}", response_model=PatientConsentResponse)
-async def request_consent(patient_id: int, body: ConsentRequestBody):
+def request_consent(patient_id: int, body: ConsentRequestBody):
     """
     Initiate DPDP consent request for a patient.
     
@@ -67,7 +65,7 @@ async def request_consent(patient_id: int, body: ConsentRequestBody):
         
     Raises:
         HTTPException 404: Patient not found
-        HTTPException 400: Consent already exists
+        HTTPException 400: Consent already verified
         HTTPException 500: Database error
     """
     conn = None
@@ -87,16 +85,57 @@ async def request_consent(patient_id: int, body: ConsentRequestBody):
         
         # Check if consent already exists
         cur.execute(
-            "SELECT consent_id FROM patient_consents WHERE patient_id = %s",
+            """
+            SELECT consent_id, consent_status
+            FROM patient_consents
+            WHERE patient_id = %s
+            """,
             (patient_id,)
         )
         existing = cur.fetchone()
+
+        # If consent already verified, block duplicate requests.
         if existing:
+            consent_id, consent_status = existing
+
+            if consent_status:
+                cur.close()
+                conn.close()
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Consent already verified for patient {patient_id}"
+                )
+
+            # Existing pending consent: refresh request timestamps and mobile number,
+            # then re-send mock OTP instead of locking user out.
+            cur.execute(
+                """
+                UPDATE patient_consents
+                SET mobile_number = pgp_sym_encrypt(%s, %s),
+                    requested_at = CURRENT_TIMESTAMP,
+                    responded_at = NULL,
+                    consent_status = FALSE
+                WHERE consent_id = %s
+                RETURNING consent_id, patient_id, consent_status, requested_at, responded_at
+                """,
+                (body.mobile_number, ENCRYPTION_KEY, consent_id)
+            )
+            row = cur.fetchone()
+            conn.commit()
             cur.close()
             conn.close()
-            raise HTTPException(
-                status_code=400,
-                detail=f"Consent request already exists for patient {patient_id}"
+
+            logger.info(
+                f"[MOCK SMS] Re-sending OTP to {body.mobile_number[-4:].rjust(10, '*')} "
+                f"for patient {patient_id}. Use any 4-6 digit code to verify."
+            )
+
+            return PatientConsentResponse(
+                consent_id=row[0],
+                patient_id=row[1],
+                consent_status=row[2],
+                requested_at=row[3],
+                responded_at=row[4]
             )
         
         # Insert new consent request with encrypted mobile number
@@ -144,7 +183,7 @@ async def request_consent(patient_id: int, body: ConsentRequestBody):
 
 
 @router.post("/consent/{patient_id}/verify", response_model=PatientConsentResponse)
-async def verify_consent(patient_id: int, body: OTPVerificationBody):
+def verify_consent(patient_id: int, body: OTPVerificationBody):
     """
     Verify OTP and grant consent for patient.
     
@@ -249,7 +288,7 @@ async def verify_consent(patient_id: int, body: OTPVerificationBody):
 
 
 @router.get("/consent/{patient_id}", response_model=PatientConsentResponse)
-async def get_consent_status(patient_id: int):
+def get_consent_status(patient_id: int):
     """
     Retrieve current consent status for a patient.
     

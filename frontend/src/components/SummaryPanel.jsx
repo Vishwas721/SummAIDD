@@ -1,6 +1,6 @@
 import { useState, useEffect, Children } from 'react'
 import axios from 'axios'
-import { Sparkles, Loader2, AlertTriangle, CheckCircle2, ChevronLeft, ChevronRight, ExternalLink, X, Download } from 'lucide-react'
+import { Sparkles, Loader2, AlertTriangle, CheckCircle2, ChevronLeft, ChevronRight, ExternalLink, X, Download, ShieldCheck } from 'lucide-react'
 import { cn } from '../lib/utils'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
@@ -31,6 +31,19 @@ export function SummaryPanel({ patientId }) {
   // Edit state for doctor to modify and save official summary
   const [editMode, setEditMode] = useState(false)
   const [editedText, setEditedText] = useState('')
+  const [maTab, setMaTab] = useState('summary') // 'summary' | 'reports' | 'insurance'
+  const [maReports, setMaReports] = useState([])
+  const [reportsLoading, setReportsLoading] = useState(false)
+  const [reportsError, setReportsError] = useState(null)
+
+  // Insurance / TPA consent state (MA view)
+  const [consentLoading, setConsentLoading] = useState(false)
+  const [consentSubmitting, setConsentSubmitting] = useState(false)
+  const [otpVerifying, setOtpVerifying] = useState(false)
+  const [consentError, setConsentError] = useState(null)
+  const [consentRecord, setConsentRecord] = useState(null)
+  const [mobileNumber, setMobileNumber] = useState('')
+  const [otpCode, setOtpCode] = useState('')
   
   console.log('🔍 Current state: summary length:', summary.length, 'generating:', generating, 'error:', error, 'chartPrepared:', chartPrepared);
   
@@ -78,6 +91,13 @@ export function SummaryPanel({ patientId }) {
     setError(null)
     setChartPrepared(false)
     setChiefComplaint('')
+    setMaTab('summary')
+    setMaReports([])
+    setReportsError(null)
+    setConsentError(null)
+    setConsentRecord(null)
+    setMobileNumber('')
+    setOtpCode('')
     setDebugInfo(prev => ({ ...prev, status: 'reset', error: null }))
     
     if (userRole === 'DOCTOR' && patientId) {
@@ -98,6 +118,90 @@ export function SummaryPanel({ patientId }) {
       console.log('❌ NOT fetching because userRole=' + userRole + ' patientId=' + patientId);
     }
   }, [patientId, userRole])
+
+  const fetchReportsForMA = async () => {
+    if (!patientId || userRole !== 'MA') return
+    setReportsLoading(true)
+    setReportsError(null)
+    try {
+      const url = `${import.meta.env.VITE_API_URL}/reports/${encodeURIComponent(patientId)}`
+      const response = await axios.get(url)
+      setMaReports(Array.isArray(response.data) ? response.data : [])
+    } catch (e) {
+      setReportsError(e.response?.data?.detail || e.message || 'Failed to load reports')
+      setMaReports([])
+    } finally {
+      setReportsLoading(false)
+    }
+  }
+
+  const fetchConsentStatus = async () => {
+    if (!patientId || userRole !== 'MA') return
+    setConsentLoading(true)
+    setConsentError(null)
+    try {
+      const url = `${import.meta.env.VITE_API_URL}/tpa/consent/${encodeURIComponent(patientId)}`
+      const response = await axios.get(url)
+      setConsentRecord(response.data || null)
+    } catch (e) {
+      if (e.response?.status === 404) {
+        // No consent exists yet; show request form without treating as fatal error.
+        setConsentRecord(null)
+      } else {
+        setConsentError(e.response?.data?.detail || e.message || 'Failed to load consent status')
+      }
+    } finally {
+      setConsentLoading(false)
+    }
+  }
+
+  const handleRequestConsent = async () => {
+    if (!patientId || !mobileNumber.trim()) return
+    setConsentSubmitting(true)
+    setConsentError(null)
+    try {
+      const url = `${import.meta.env.VITE_API_URL}/tpa/consent/${encodeURIComponent(patientId)}`
+      const response = await axios.post(url, { mobile_number: mobileNumber.trim() })
+      setConsentRecord(response.data || null)
+      setOtpCode('')
+    } catch (e) {
+      const status = e.response?.status
+      const detail = e.response?.data?.detail || e.message || 'Failed to request consent'
+      if (status === 400 && String(detail).toLowerCase().includes('already exists')) {
+        await fetchConsentStatus()
+      } else {
+        setConsentError(detail)
+      }
+    } finally {
+      setConsentSubmitting(false)
+    }
+  }
+
+  const handleVerifyConsent = async () => {
+    if (!patientId || !otpCode.trim()) return
+    setOtpVerifying(true)
+    setConsentError(null)
+    try {
+      const url = `${import.meta.env.VITE_API_URL}/tpa/consent/${encodeURIComponent(patientId)}/verify`
+      const response = await axios.post(url, { otp: otpCode.trim() })
+      setConsentRecord(response.data || null)
+      setOtpCode('')
+    } catch (e) {
+      setConsentError(e.response?.data?.detail || e.message || 'Failed to verify OTP')
+    } finally {
+      setOtpVerifying(false)
+    }
+  }
+
+  useEffect(() => {
+    if (userRole !== 'MA' || !patientId) return
+    if (maTab === 'reports' && maReports.length === 0 && !reportsLoading) {
+      fetchReportsForMA()
+    }
+    if (maTab === 'insurance') {
+      fetchConsentStatus()
+    }
+  }, [maTab, patientId, userRole])
 
   const fetchPersistedSummary = async () => {
     console.log('🔥🔥🔥 fetchPersistedSummary CALLED');
@@ -304,90 +408,272 @@ export function SummaryPanel({ patientId }) {
       <div className="h-full w-full overflow-auto bg-gradient-to-br from-purple-50 via-white to-blue-50 dark:from-slate-900 dark:via-slate-800 dark:to-blue-900">
         <div className="w-full px-8 py-8">
           <div className="w-full bg-gradient-to-br from-purple-50 to-blue-50 dark:from-slate-900 dark:to-blue-900 rounded-2xl shadow-2xl border-2 border-purple-200 dark:border-purple-800 p-12">
-            <div className="text-center mb-8">
-              <div className="inline-flex p-6 bg-gradient-to-br from-purple-500 to-blue-600 rounded-full shadow-lg mb-4">
-                <Sparkles className="h-12 w-12 text-white" />
+            <div className="mb-8">
+              <div className="inline-flex items-center gap-1 p-1 rounded-lg bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700">
+                <button
+                  onClick={() => setMaTab('summary')}
+                  className={cn(
+                    'px-3 py-1.5 text-xs font-semibold rounded-md transition-all',
+                    maTab === 'summary'
+                      ? 'bg-blue-500 text-white'
+                      : 'text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-700'
+                  )}
+                >
+                  Summary
+                </button>
+                <button
+                  onClick={() => setMaTab('reports')}
+                  className={cn(
+                    'px-3 py-1.5 text-xs font-semibold rounded-md transition-all',
+                    maTab === 'reports'
+                      ? 'bg-blue-500 text-white'
+                      : 'text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-700'
+                  )}
+                >
+                  Reports
+                </button>
+                <button
+                  onClick={() => setMaTab('insurance')}
+                  className={cn(
+                    'px-3 py-1.5 text-xs font-semibold rounded-md transition-all',
+                    maTab === 'insurance'
+                      ? 'bg-blue-500 text-white'
+                      : 'text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-700'
+                  )}
+                >
+                  Insurance (TPA)
+                </button>
               </div>
-              <h2 className="text-3xl font-bold text-slate-800 dark:text-slate-100 mb-3">Prepare Patient Chart</h2>
-              <p className="text-sm text-slate-600 dark:text-slate-400">Generate clinical summary for doctor review</p>
             </div>
-            
-            {!patientId ? (
-              <div className="text-center p-10 bg-white/50 dark:bg-slate-900/50 rounded-xl border-2 border-dashed border-slate-300 dark:border-slate-700">
-                <p className="text-lg text-slate-500 dark:text-slate-400">Please select a patient from the header</p>
-              </div>
-            ) : (
-              <>
+
+            {maTab === 'reports' ? (
+              <div>
                 <div className="mb-6">
-                  <label className="block text-sm font-bold text-slate-700 dark:text-slate-300 mb-3">
-                    Visit Reason / Chief Complaint
-                  </label>
-                  <textarea
-                    value={chiefComplaint}
-                    onChange={(e) => setChiefComplaint(e.target.value)}
-                    placeholder="e.g., Worsening headaches for 3 days, accompanied by nausea..."
-                    rows={6}
-                    className="w-full text-sm px-4 py-3 rounded-lg border-2 border-slate-300 dark:border-slate-600 bg-white dark:bg-slate-700 text-slate-700 dark:text-slate-100 focus:outline-none focus:ring-2 focus:ring-purple-400 dark:focus:ring-purple-600 focus:border-transparent"
-                  />
-                  <p className="text-xs text-slate-500 dark:text-slate-400 mt-2">Optional: Helps focus the summary on relevant findings</p>
+                  <h2 className="text-2xl font-bold text-slate-800 dark:text-slate-100 mb-2">Patient Reports</h2>
+                  <p className="text-sm text-slate-600 dark:text-slate-400">Review available documents before chart preparation.</p>
                 </div>
 
-                {error && (
-                  <div className="mb-6 p-4 bg-red-50 dark:bg-red-900/20 border-2 border-red-200 dark:border-red-800 rounded-lg animate-in fade-in">
+                {!patientId ? (
+                  <div className="text-center p-10 bg-white/50 dark:bg-slate-900/50 rounded-xl border-2 border-dashed border-slate-300 dark:border-slate-700">
+                    <p className="text-lg text-slate-500 dark:text-slate-400">Please select a patient from the header</p>
+                  </div>
+                ) : reportsLoading ? (
+                  <div className="p-6 rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 flex items-center gap-2 text-sm text-slate-600 dark:text-slate-300">
+                    <Loader2 className="h-4 w-4 animate-spin" />
+                    Loading reports...
+                  </div>
+                ) : reportsError ? (
+                  <div className="p-4 bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-800 rounded-lg">
+                    <p className="text-sm font-semibold text-red-700 dark:text-red-300">Failed to load reports</p>
+                    <p className="text-xs text-red-600 dark:text-red-400 mt-1">{reportsError}</p>
+                    <button
+                      onClick={fetchReportsForMA}
+                      className="mt-3 px-3 py-1.5 text-xs font-semibold rounded-md bg-blue-500 text-white hover:bg-blue-600"
+                    >
+                      Retry
+                    </button>
+                  </div>
+                ) : maReports.length === 0 ? (
+                  <div className="p-6 rounded-lg border border-amber-200 dark:border-amber-800 bg-amber-50 dark:bg-amber-900/20 text-sm text-amber-700 dark:text-amber-300">
+                    No reports found for this patient.
+                  </div>
+                ) : (
+                  <div className="space-y-3">
+                    {maReports.map((report) => (
+                      <div
+                        key={report.report_id}
+                        className="p-4 rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800"
+                      >
+                        <p className="text-sm font-semibold text-slate-800 dark:text-slate-100">{report.filename || `Report #${report.report_id}`}</p>
+                        <p className="text-xs text-slate-500 dark:text-slate-400 mt-1">Type: {report.report_type || 'General'}</p>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            ) : maTab === 'insurance' ? (
+              <div>
+                <div className="mb-6">
+                  <h2 className="text-2xl font-bold text-slate-800 dark:text-slate-100 mb-2">Insurance / TPA Consent</h2>
+                  <p className="text-sm text-slate-600 dark:text-slate-400">Manage DPDP consent before insurance document validation.</p>
+                </div>
+
+                {!patientId ? (
+                  <div className="text-center p-10 bg-white/50 dark:bg-slate-900/50 rounded-xl border-2 border-dashed border-slate-300 dark:border-slate-700">
+                    <p className="text-lg text-slate-500 dark:text-slate-400">Please select a patient from the header</p>
+                  </div>
+                ) : consentLoading ? (
+                  <div className="p-6 rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 flex items-center gap-2 text-sm text-slate-600 dark:text-slate-300">
+                    <Loader2 className="h-4 w-4 animate-spin" />
+                    Checking consent status...
+                  </div>
+                ) : consentError ? (
+                  <div className="p-4 bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-800 rounded-lg">
+                    <p className="text-sm font-semibold text-red-700 dark:text-red-300">Unable to check consent status</p>
+                    <p className="text-xs text-red-600 dark:text-red-400 mt-1">{consentError}</p>
+                    <button
+                      onClick={fetchConsentStatus}
+                      className="mt-3 px-3 py-1.5 text-xs font-semibold rounded-md bg-blue-500 text-white hover:bg-blue-600"
+                    >
+                      Retry
+                    </button>
+                  </div>
+                ) : consentRecord?.consent_status ? (
+                  <div className="p-6 bg-green-50 dark:bg-green-900/20 border border-green-300 dark:border-green-700 rounded-lg">
                     <div className="flex items-start gap-3">
-                      <AlertTriangle className="h-6 w-6 text-red-600 dark:text-red-400 flex-shrink-0 mt-0.5" />
+                      <ShieldCheck className="h-6 w-6 text-green-600 dark:text-green-400 mt-0.5" />
                       <div>
-                        <p className="text-sm font-bold text-red-700 dark:text-red-300">Generation Error</p>
-                        <p className="text-xs text-red-600 dark:text-red-400 mt-1">{error}</p>
+                        <p className="text-sm font-bold text-green-700 dark:text-green-300">Consent Verified</p>
+                        <p className="text-xs text-green-600 dark:text-green-400 mt-1">Ready for Document Upload.</p>
                       </div>
                     </div>
                   </div>
-                )}
-
-                {chartPrepared && !generating && !error && (
-                  <div className="mb-6 p-8 bg-green-50 dark:bg-green-900/20 border-2 border-green-400 dark:border-green-700 rounded-xl animate-in zoom-in">
-                    <div className="flex flex-col items-center gap-4">
-                      <div className="p-4 bg-green-500 rounded-full">
-                        <CheckCircle2 className="h-12 w-12 text-white" />
-                      </div>
-                      <div className="text-center">
-                        <p className="text-2xl font-bold text-green-700 dark:text-green-300 mb-2">Chart Prepared!</p>
-                        <p className="text-sm text-green-600 dark:text-green-400">
-                          Clinical summary generated successfully. Ready for doctor review.
-                        </p>
-                        <p className="text-xs text-green-500 dark:text-green-500 mt-3">
-                          Select a different patient or change chief complaint to generate a new summary.
-                        </p>
+                ) : (
+                  <div className="space-y-4">
+                    <div className="p-4 rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800">
+                      <p className="text-sm font-semibold text-slate-800 dark:text-slate-100 mb-2">Request Consent</p>
+                      <p className="text-xs text-slate-500 dark:text-slate-400 mb-3">Enter patient mobile number to initiate OTP-based consent.</p>
+                      <div className="flex gap-2">
+                        <input
+                          type="tel"
+                          value={mobileNumber}
+                          onChange={(e) => setMobileNumber(e.target.value)}
+                          placeholder="e.g., +919876543210"
+                          className="flex-1 text-sm px-3 py-2 rounded-md border border-slate-300 dark:border-slate-600 bg-white dark:bg-slate-700 text-slate-700 dark:text-slate-100 focus:outline-none focus:ring-2 focus:ring-blue-400"
+                        />
+                        <button
+                          onClick={handleRequestConsent}
+                          disabled={consentSubmitting || !mobileNumber.trim()}
+                          className={cn(
+                            'px-4 py-2 text-sm font-semibold rounded-md transition-all',
+                            consentSubmitting || !mobileNumber.trim()
+                              ? 'bg-slate-200 dark:bg-slate-700 text-slate-400 cursor-not-allowed'
+                              : 'bg-blue-500 text-white hover:bg-blue-600'
+                          )}
+                        >
+                          {consentSubmitting ? 'Requesting...' : 'Request Consent'}
+                        </button>
                       </div>
                     </div>
+
+                    {consentRecord && !consentRecord.consent_status && (
+                      <div className="p-4 rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800">
+                        <p className="text-sm font-semibold text-slate-800 dark:text-slate-100 mb-2">Verify OTP</p>
+                        <p className="text-xs text-slate-500 dark:text-slate-400 mb-3">A mock OTP has been sent. Enter the OTP to confirm consent.</p>
+                        <div className="flex gap-2">
+                          <input
+                            type="text"
+                            value={otpCode}
+                            onChange={(e) => setOtpCode(e.target.value)}
+                            placeholder="Enter OTP"
+                            className="flex-1 text-sm px-3 py-2 rounded-md border border-slate-300 dark:border-slate-600 bg-white dark:bg-slate-700 text-slate-700 dark:text-slate-100 focus:outline-none focus:ring-2 focus:ring-blue-400"
+                          />
+                          <button
+                            onClick={handleVerifyConsent}
+                            disabled={otpVerifying || !otpCode.trim()}
+                            className={cn(
+                              'px-4 py-2 text-sm font-semibold rounded-md transition-all',
+                              otpVerifying || !otpCode.trim()
+                                ? 'bg-slate-200 dark:bg-slate-700 text-slate-400 cursor-not-allowed'
+                                : 'bg-blue-500 text-white hover:bg-blue-600'
+                            )}
+                          >
+                            {otpVerifying ? 'Verifying...' : 'Verify OTP'}
+                          </button>
+                        </div>
+                      </div>
+                    )}
                   </div>
                 )}
+              </div>
+            ) : (
+              <div>
+                <div className="text-center mb-8">
+                  <div className="inline-flex p-6 bg-gradient-to-br from-purple-500 to-blue-600 rounded-full shadow-lg mb-4">
+                    <Sparkles className="h-12 w-12 text-white" />
+                  </div>
+                  <h2 className="text-3xl font-bold text-slate-800 dark:text-slate-100 mb-3">Prepare Patient Chart</h2>
+                  <p className="text-sm text-slate-600 dark:text-slate-400">Generate clinical summary for doctor review</p>
+                </div>
 
-                {!chartPrepared && (
-                  <button
-                    onClick={handleGenerate}
-                    disabled={generating}
-                    className={cn(
-                      "w-full py-5 text-lg font-bold rounded-xl transition-all duration-300 shadow-xl flex items-center justify-center gap-3",
-                      generating
-                        ? "bg-slate-300 dark:bg-slate-600 text-slate-500 dark:text-slate-400 cursor-not-allowed"
-                        : "bg-gradient-to-r from-purple-500 via-purple-600 to-blue-600 text-white hover:from-purple-600 hover:via-purple-700 hover:to-blue-700 hover:shadow-2xl hover:scale-[1.02] active:scale-[0.98]"
+                {!patientId ? (
+                  <div className="text-center p-10 bg-white/50 dark:bg-slate-900/50 rounded-xl border-2 border-dashed border-slate-300 dark:border-slate-700">
+                    <p className="text-lg text-slate-500 dark:text-slate-400">Please select a patient from the header</p>
+                  </div>
+                ) : (
+                  <>
+                    <div className="mb-6">
+                      <label className="block text-sm font-bold text-slate-700 dark:text-slate-300 mb-3">
+                        Visit Reason / Chief Complaint
+                      </label>
+                      <textarea
+                        value={chiefComplaint}
+                        onChange={(e) => setChiefComplaint(e.target.value)}
+                        placeholder="e.g., Worsening headaches for 3 days, accompanied by nausea..."
+                        rows={6}
+                        className="w-full text-sm px-4 py-3 rounded-lg border-2 border-slate-300 dark:border-slate-600 bg-white dark:bg-slate-700 text-slate-700 dark:text-slate-100 focus:outline-none focus:ring-2 focus:ring-purple-400 dark:focus:ring-purple-600 focus:border-transparent"
+                      />
+                      <p className="text-xs text-slate-500 dark:text-slate-400 mt-2">Optional: Helps focus the summary on relevant findings</p>
+                    </div>
+
+                    {error && (
+                      <div className="mb-6 p-4 bg-red-50 dark:bg-red-900/20 border-2 border-red-200 dark:border-red-800 rounded-lg animate-in fade-in">
+                        <div className="flex items-start gap-3">
+                          <AlertTriangle className="h-6 w-6 text-red-600 dark:text-red-400 flex-shrink-0 mt-0.5" />
+                          <div>
+                            <p className="text-sm font-bold text-red-700 dark:text-red-300">Generation Error</p>
+                            <p className="text-xs text-red-600 dark:text-red-400 mt-1">{error}</p>
+                          </div>
+                        </div>
+                      </div>
                     )}
-                  >
-                    {generating ? (
-                      <>
-                        <Loader2 className="h-6 w-6 animate-spin" />
-                        Analyzing Records...
-                      </>
-                    ) : (
-                      <>
-                        <Sparkles className="h-6 w-6" />
-                        Generate Summary
-                      </>
+
+                    {chartPrepared && !generating && !error && (
+                      <div className="mb-6 p-8 bg-green-50 dark:bg-green-900/20 border-2 border-green-400 dark:border-green-700 rounded-xl animate-in zoom-in">
+                        <div className="flex flex-col items-center gap-4">
+                          <div className="p-4 bg-green-500 rounded-full">
+                            <CheckCircle2 className="h-12 w-12 text-white" />
+                          </div>
+                          <div className="text-center">
+                            <p className="text-2xl font-bold text-green-700 dark:text-green-300 mb-2">Chart Prepared!</p>
+                            <p className="text-sm text-green-600 dark:text-green-400">
+                              Clinical summary generated successfully. Ready for doctor review.
+                            </p>
+                            <p className="text-xs text-green-500 dark:text-green-500 mt-3">
+                              Select a different patient or change chief complaint to generate a new summary.
+                            </p>
+                          </div>
+                        </div>
+                      </div>
                     )}
-                  </button>
+
+                    {!chartPrepared && (
+                      <button
+                        onClick={handleGenerate}
+                        disabled={generating}
+                        className={cn(
+                          "w-full py-5 text-lg font-bold rounded-xl transition-all duration-300 shadow-xl flex items-center justify-center gap-3",
+                          generating
+                            ? "bg-slate-300 dark:bg-slate-600 text-slate-500 dark:text-slate-400 cursor-not-allowed"
+                            : "bg-gradient-to-r from-purple-500 via-purple-600 to-blue-600 text-white hover:from-purple-600 hover:via-purple-700 hover:to-blue-700 hover:shadow-2xl hover:scale-[1.02] active:scale-[0.98]"
+                        )}
+                      >
+                        {generating ? (
+                          <>
+                            <Loader2 className="h-6 w-6 animate-spin" />
+                            Analyzing Records...
+                          </>
+                        ) : (
+                          <>
+                            <Sparkles className="h-6 w-6" />
+                            Generate Summary
+                          </>
+                        )}
+                      </button>
+                    )}
+                  </>
                 )}
-              </>
+              </div>
             )}
           </div>
         </div>
