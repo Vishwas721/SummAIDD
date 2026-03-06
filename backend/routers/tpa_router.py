@@ -8,6 +8,7 @@ Endpoints handle consent requests, OTP verification, and status checks.
 
 import os
 import io
+import asyncio
 import logging
 from fastapi import APIRouter, HTTPException, UploadFile, File, BackgroundTasks
 from pydantic import BaseModel, Field
@@ -18,6 +19,7 @@ from db_utils import (
     insert_claim_document_encrypted,
     update_claim_status,
 )
+from tpa_prompts import _validate_claim_document
 
 router = APIRouter(prefix="/tpa", tags=["TPA Consent"])
 logger = logging.getLogger(__name__)
@@ -119,7 +121,7 @@ def _run_claim_document_ingestion_task(
             update_claim_status(
                 claim_id,
                 "RED",
-                {"document_text": "Insufficient extractable text found in uploaded claim document"},
+                ["Insufficient extractable text found in uploaded claim document"],
             )
             logger.warning(f"[TPA VALIDATION] claim_id={claim_id} flagged RED (insufficient text)")
             return
@@ -131,13 +133,15 @@ def _run_claim_document_ingestion_task(
             extracted_text=extracted_text,
         )
 
-        # Phase 2 placeholder: mark as GREEN when text is available.
-        update_claim_status(claim_id, "GREEN", {})
-        logger.info(f"[TPA VALIDATION] claim_id={claim_id} completed with GREEN status")
+        # Run async traffic-light LLM validation in the background worker context.
+        # Run synchronous traffic-light LLM validation in the background worker context.
+        validation = _validate_claim_document(extracted_text)
+        update_claim_status(claim_id, validation.status.value, validation.discrepancies)
+        logger.info(f"[TPA VALIDATION] claim_id={claim_id} completed with {validation.status.value} status")
     except Exception as e:
         logger.exception(f"[TPA VALIDATION] background task failed for claim_id={claim_id}: {e}")
         try:
-            update_claim_status(claim_id, "RED", {"system_error": str(e)})
+            update_claim_status(claim_id, "RED", [f"system_error: {str(e)}"])
         except Exception:
             logger.exception(f"[TPA VALIDATION] failed to set RED fallback for claim_id={claim_id}")
 
@@ -181,7 +185,7 @@ def upload_claim_document(
     suffix = os.path.splitext(filename)[1].lower()
     content_type = (file.content_type or "").lower()
 
-    if content_type not in ALLOWED_CONTENT_TYPES or suffix not in ALLOWED_EXTENSIONS:
+    if content_type not in ALLOWED_CONTENT_TYPES and suffix not in ALLOWED_EXTENSIONS:
         raise HTTPException(status_code=400, detail="Only PDF, JPG, JPEG, or PNG files are allowed")
 
     if not _patient_has_verified_consent(patient_id):
@@ -199,7 +203,7 @@ def upload_claim_document(
         mime = content_type or "application/octet-stream"
 
         # Parent claim row is created first, then heavy extraction + child insert run in background.
-        claim_id = create_claim_record(patient_id=patient_id, status="PENDING", discrepancies={})
+        claim_id = create_claim_record(patient_id=patient_id, status="PROCESSING", discrepancies=[])
 
         background_tasks.add_task(
             _run_claim_document_ingestion_task,

@@ -11,7 +11,7 @@ Functions:
 import os
 import logging
 import json
-from typing import List, Dict, Optional
+from typing import List, Dict, Optional, Any
 import psycopg2
 from psycopg2.extras import RealDictCursor
 from dotenv import load_dotenv
@@ -297,6 +297,28 @@ def ensure_claim_document_support() -> None:
         cur.execute("CREATE INDEX IF NOT EXISTS idx_claim_documents_claim_id ON claim_documents(claim_id)")
         cur.execute("CREATE INDEX IF NOT EXISTS idx_claim_documents_created_at ON claim_documents(created_at DESC)")
 
+        # Ensure insurance_claims status constraint supports PROCESSING lifecycle.
+        cur.execute(
+            """
+            SELECT c.conname
+            FROM pg_constraint c
+            JOIN pg_class t ON c.conrelid = t.oid
+            WHERE t.relname = 'insurance_claims'
+              AND c.contype = 'c'
+              AND pg_get_constraintdef(c.oid) ILIKE '%status%'
+            """
+        )
+        for (constraint_name,) in cur.fetchall():
+            cur.execute(f'ALTER TABLE insurance_claims DROP CONSTRAINT IF EXISTS "{constraint_name}"')
+
+        cur.execute(
+            """
+            ALTER TABLE insurance_claims
+            ADD CONSTRAINT insurance_claims_status_check
+            CHECK (status IN ('PROCESSING', 'RED', 'YELLOW', 'GREEN', 'PENDING'))
+            """
+        )
+
         conn.commit()
         cur.close()
     except Exception as e:
@@ -359,7 +381,7 @@ def create_claim_with_document(patient_id: int, filename: str, mime_type: str, e
             conn.close()
 
 
-def create_claim_record(patient_id: int, status: str = "PENDING", discrepancies: Optional[Dict] = None) -> int:
+def create_claim_record(patient_id: int, status: str = "PROCESSING", discrepancies: Optional[Any] = None) -> int:
     """
     Create a parent insurance claim row and return claim_id.
 
@@ -445,7 +467,7 @@ def get_decrypted_claim_document_text(claim_id: int) -> str:
             conn.close()
 
 
-def update_claim_status(claim_id: int, status: str, discrepancies: Optional[Dict] = None) -> None:
+def update_claim_status(claim_id: int, status: str, discrepancies: Optional[Any] = None) -> None:
     """Update insurance claim status and discrepancies payload."""
     conn = None
     try:
@@ -458,7 +480,7 @@ def update_claim_status(claim_id: int, status: str, discrepancies: Optional[Dict
                 discrepancies = %s::jsonb
             WHERE claim_id = %s
             """,
-            (status, json.dumps(discrepancies or {}), claim_id)
+            (status, json.dumps(discrepancies if discrepancies is not None else []), claim_id)
         )
         conn.commit()
         cur.close()
