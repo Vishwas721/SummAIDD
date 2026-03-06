@@ -1,4 +1,4 @@
-import { useState, useEffect, Children } from 'react'
+import { useState, useEffect, useRef, useCallback, Children } from 'react'
 import axios from 'axios'
 import { Sparkles, Loader2, AlertTriangle, CheckCircle2, ChevronLeft, ChevronRight, ExternalLink, X, Download, ShieldCheck } from 'lucide-react'
 import { cn } from '../lib/utils'
@@ -79,6 +79,92 @@ export function SummaryPanel({ patientId }) {
   }
 
   const [debugInfo, setDebugInfo] = useState({ status: 'idle', url: '', error: null, response: null })
+  const pollIntervalRef = useRef(null)
+  const isEditModeRef = useRef(false)
+  const fetchPersistedSummaryRef = useRef(null)
+
+  useEffect(() => {
+    isEditModeRef.current = editMode
+  }, [editMode])
+
+  const fetchPersistedSummary = useCallback(async ({ silent = false } = {}) => {
+    console.log('🔥🔥🔥 fetchPersistedSummary CALLED');
+    console.log('🔑 Current patientId:', patientId, 'Type:', typeof patientId);
+    console.log('🌍 VITE_API_URL:', import.meta.env.VITE_API_URL);
+
+    if (!patientId) {
+      console.log('❌❌❌ fetchPersistedSummary: No patientId provided - ABORTING')
+      return
+    }
+
+    // Silent background polling should never trigger loading flicker.
+    if (!silent) {
+      console.log('⚙️ Setting generating=true');
+      setGenerating(true)
+      setError(null)
+    }
+
+    const url = `${import.meta.env.VITE_API_URL}/summary/${encodeURIComponent(patientId)}?t=${Date.now()}`
+    console.log('🌐 Full URL constructed:', url);
+    if (!silent) {
+      setDebugInfo({ status: 'fetching', url, error: null, response: null })
+    }
+
+    try {
+      console.log('📡 About to call axios.get...');
+      const response = await axios.get(url)
+      console.log('✅✅✅ axios.get SUCCESS');
+      const data = response.data || {}
+
+      // Never overwrite doctor's active edits while editing.
+      if (isEditModeRef.current) {
+        console.log('🛡️ Edit mode active: skipping state overwrite during fetch')
+        if (!silent) {
+          setDebugInfo({ status: 'success', url, error: null, response: data })
+        }
+        return
+      }
+
+      setSummary(data.summary_text || '')
+      setEditedText(data.summary_text || '')
+      setCitations(Array.isArray(data.citations) ? data.citations : [])
+      setChartPrepared(!!data.summary_text)
+
+      if (!silent) {
+        setDebugInfo({ status: 'success', url, error: null, response: data })
+      }
+    } catch (e) {
+      console.log('💥💥💥 AXIOS ERROR CAUGHT');
+      const errorMsg = e.response?.data?.detail || e.message || 'Failed to load summary'
+
+      if (!silent) {
+        setDebugInfo({ status: 'error', url, error: errorMsg, response: e.response?.status })
+      }
+
+      if (e.response?.status === 404) {
+        if (!isEditModeRef.current) {
+          setSummary('')
+          setEditedText('')
+          setCitations([])
+          setChartPrepared(false)
+        }
+      } else if (!silent) {
+        console.error('❌❌❌ Fetch summary error for patient', patientId)
+        setError(errorMsg)
+      } else {
+        console.warn('Silent polling fetch failed:', errorMsg)
+      }
+    } finally {
+      if (!silent) {
+        console.log('🏁 fetchPersistedSummary COMPLETE - setting generating=false');
+        setGenerating(false)
+      }
+    }
+  }, [patientId])
+
+  useEffect(() => {
+    fetchPersistedSummaryRef.current = fetchPersistedSummary
+  }, [fetchPersistedSummary])
 
   useEffect(() => {
     console.log('🚨🚨🚨 SummaryPanel: useEffect TRIGGERED');
@@ -99,25 +185,35 @@ export function SummaryPanel({ patientId }) {
     setMobileNumber('')
     setOtpCode('')
     setDebugInfo(prev => ({ ...prev, status: 'reset', error: null }))
+
+    if (pollIntervalRef.current) {
+      clearInterval(pollIntervalRef.current)
+      pollIntervalRef.current = null
+    }
     
     if (userRole === 'DOCTOR' && patientId) {
       console.log('🚀🚀🚀 CALLING fetchPersistedSummary NOW');
-      fetchPersistedSummary()
+      fetchPersistedSummary({ silent: false })
       
       // Poll for updates every 5 seconds
-      const pollInterval = setInterval(() => {
+      pollIntervalRef.current = setInterval(() => {
         console.log('⏰ Poll interval triggered for patient:', patientId);
-        fetchPersistedSummary()
+        if (fetchPersistedSummaryRef.current) {
+          fetchPersistedSummaryRef.current({ silent: true })
+        }
       }, 5000)
       
       return () => {
         console.log('🧹 Cleanup: clearing poll interval');
-        clearInterval(pollInterval)
+        if (pollIntervalRef.current) {
+          clearInterval(pollIntervalRef.current)
+          pollIntervalRef.current = null
+        }
       }
     } else {
       console.log('❌ NOT fetching because userRole=' + userRole + ' patientId=' + patientId);
     }
-  }, [patientId, userRole])
+  }, [patientId, userRole, fetchPersistedSummary])
 
   const fetchReportsForMA = async () => {
     if (!patientId || userRole !== 'MA') return
@@ -202,72 +298,6 @@ export function SummaryPanel({ patientId }) {
       fetchConsentStatus()
     }
   }, [maTab, patientId, userRole])
-
-  const fetchPersistedSummary = async () => {
-    console.log('🔥🔥🔥 fetchPersistedSummary CALLED');
-    console.log('🔑 Current patientId:', patientId, 'Type:', typeof patientId);
-    console.log('🌍 VITE_API_URL:', import.meta.env.VITE_API_URL);
-    
-    if (!patientId) {
-      console.log('❌❌❌ fetchPersistedSummary: No patientId provided - ABORTING')
-      return
-    }
-    
-    console.log('⚙️ Setting generating=true');
-    setGenerating(true)
-    setError(null)
-    
-    const url = `${import.meta.env.VITE_API_URL}/summary/${encodeURIComponent(patientId)}?t=${Date.now()}`
-    console.log('🌐 Full URL constructed:', url);
-    setDebugInfo({ status: 'fetching', url, error: null, response: null })
-
-    try {
-      console.log('📡 About to call axios.get...');
-      const response = await axios.get(url)
-      console.log('✅✅✅ axios.get SUCCESS');
-      console.log('📦 Response status:', response.status);
-      console.log('📦 Response headers:', response.headers);
-      const data = response.data || {}
-      console.log('📊 Response data:', data);
-      console.log('📝 summary_text length:', data.summary_text?.length || 0);
-      console.log('📎 citations count:', data.citations?.length || 0);
-      
-      console.log('💾 Setting state: summary');
-      setSummary(data.summary_text || '')
-      console.log('💾 Setting state: editedText');
-      setEditedText(data.summary_text || '')
-      console.log('💾 Setting state: citations');
-      setCitations(Array.isArray(data.citations) ? data.citations : [])
-      console.log('💾 Setting state: chartPrepared');
-      setChartPrepared(!!data.summary_text)
-      console.log('💾 Setting state: debugInfo');
-      setDebugInfo({ status: 'success', url, error: null, response: data })
-      console.log('🎉🎉🎉 Summary loaded successfully!');
-    } catch (e) {
-      console.log('💥💥💥 AXIOS ERROR CAUGHT');
-      console.log('Error object:', e);
-      console.log('Error response:', e.response);
-      console.log('Error response status:', e.response?.status);
-      console.log('Error response data:', e.response?.data);
-      console.log('Error message:', e.message);
-      
-      const errorMsg = e.response?.data?.detail || e.message || 'Failed to load summary'
-      setDebugInfo({ status: 'error', url, error: errorMsg, response: e.response?.status })
-      
-      if (e.response?.status === 404) {
-        console.log('⚠️⚠️⚠️ Summary not found (404) for patient:', patientId)
-        setSummary('')
-        setCitations([])
-        setChartPrepared(false)
-      } else {
-        console.error('❌❌❌ Fetch summary error for patient', patientId)
-        setError(errorMsg)
-      }
-    } finally {
-      console.log('🏁 fetchPersistedSummary COMPLETE - setting generating=false');
-      setGenerating(false)
-    }
-  }
 
   const handleSaveEditedSummary = async () => {
     if (!patientId) return
@@ -850,34 +880,6 @@ export function SummaryPanel({ patientId }) {
 
 
 
-        {/* Footnotes removed per UX request */}
-
-        {!generating && citations.length > 0 && false && (
-          <details className="mt-8 border-t border-slate-200 dark:border-slate-700 pt-6">
-            <summary className="text-sm font-semibold text-slate-600 dark:text-slate-400 cursor-pointer hover:text-slate-800 dark:hover:text-slate-200 mb-3">
-              📎 View Evidence Sources ({citations.length})
-            </summary>
-            <div className="grid gap-3 mt-4">
-              {citations.map((c, idx) => {
-                const meta = c.source_metadata || {}
-                const page = meta.page ?? meta.page_number ?? 1
-                return (
-                  <div key={idx} className="p-4 rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-900/50 hover:shadow-md transition-all">
-                    <div className="flex items-center justify-between mb-2">
-                      <span className="text-xs font-bold px-2 py-1 rounded-full bg-blue-100 dark:bg-blue-900/40 text-blue-700 dark:text-blue-300">
-                        Citation {idx + 1}
-                      </span>
-                      <span className="text-xs text-slate-500 dark:text-slate-400">Page {page}</span>
-                    </div>
-                    <p className="text-xs leading-relaxed text-slate-700 dark:text-slate-300">
-                      {c.source_text_preview}
-                    </p>
-                  </div>
-                )
-              })}
-            </div>
-          </details>
-        )}
       </div>
 
       {/* Right: PDF Preview panel */}
