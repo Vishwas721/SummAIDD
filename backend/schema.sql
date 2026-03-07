@@ -88,3 +88,21 @@ CREATE TABLE alert_overrides (
 );
 
 CREATE INDEX idx_alert_overrides_patient ON alert_overrides(patient_id);
+
+-- ============================================================================
+-- EPIC 4.3: Patient-Facing "Simple Summary" Persistence
+-- ============================================================================
+
+-- Stores structured, patient-friendly summaries derived from technical summaries.
+CREATE TABLE patient_friendly_summaries (
+    id SERIAL PRIMARY KEY,
+    patient_id INTEGER NOT NULL REFERENCES patients(patient_id) ON DELETE CASCADE,
+    -- References existing patient_summaries PK (patient_id) without modifying that table.
+    base_summary_id INTEGER NOT NULL REFERENCES patient_summaries(patient_id) ON DELETE CASCADE,
+    language TEXT NOT NULL DEFAULT 'English',
+    simple_text JSONB NOT NULL,
+    generated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX idx_patient_friendly_summaries_patient_id ON patient_friendly_summaries(patient_id);
+CREATE INDEX idx_patient_friendly_summaries_generated_at ON patient_friendly_summaries(generated_at DESC);
