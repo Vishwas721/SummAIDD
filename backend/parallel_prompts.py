@@ -664,7 +664,7 @@ async def _generate_structured_summary_parallel(
             "specialty": "general"
         }
         return json.dumps(fallback, indent=2)
-    
+
     except Exception as e:
         logger.error(f"⚠️ Parallel summary generation failed for {patient_label}: {e}")
         # Fallback to minimal structure
@@ -677,3 +677,63 @@ async def _generate_structured_summary_parallel(
             "specialty": "general"
         }
         return json.dumps(fallback, indent=2)
+
+
+async def _generate_patient_friendly_summary(
+    technical_summary_json: Dict[str, Any],
+    language: str = "English",
+    model: str = "llama3:8b"
+) -> Dict[str, str]:
+    """
+    Generate a patient-friendly rewrite from technical medical summary JSON.
+
+    The output is validated against PatientFriendlyResponseSchema to enforce a
+    strict 3-field response for frontend-safe rendering.
+    """
+    summary_payload = json.dumps(technical_summary_json, ensure_ascii=False, indent=2)
+
+    prompt = f"""You are an empathetic doctor speaking directly to a patient.
+
+Rewrite the technical medical summary below into simple, supportive language in {language}.
+
+MANDATORY RULES:
+1) Speak directly to the patient using phrases like "You have..." and "Your test shows...".
+2) Keep reading level around 8th grade.
+3) Avoid medical jargon completely. Replace technical words with plain language.
+   Example: "erythema" -> "redness", "hypertension" -> "high blood pressure".
+4) Do not add new facts. Use only information present in the source summary.
+5) If information is missing, say so in simple words rather than guessing.
+6) next_steps must be a plain-text bullet list using hyphen bullets.
+
+OUTPUT FORMAT:
+- Return ONLY valid JSON.
+- No markdown fences.
+- No extra keys.
+- JSON must match exactly:
+{{
+  "condition_explanation": "string",
+  "current_status": "string",
+  "next_steps": "string"
+}}
+
+Technical Summary JSON:
+{summary_payload}
+
+Return JSON only:"""
+
+    result = await _call_llm_async(prompt=prompt, model=model, temperature=0.1)
+    if result.startswith('⚠️ Error:'):
+        raise ValueError(f"Patient-friendly generation failed: {result}")
+
+    try:
+        start = result.find('{')
+        end = result.rfind('}')
+        if start < 0 or end < 0:
+            raise ValueError("Model did not return JSON")
+        parsed = json.loads(result[start:end + 1])
+    except json.JSONDecodeError as e:
+        raise ValueError(f"Invalid JSON returned by model: {e}")
+
+    from schemas import PatientFriendlyResponseSchema
+    validated = PatientFriendlyResponseSchema.model_validate(parsed)
+    return validated.model_dump()

@@ -15,8 +15,8 @@ from routers.patient_router import router as patient_router
 from routers.tpa_router import router as tpa_router
 from routers.audit_router import router as audit_router
 from db_utils import ensure_claim_document_support
-from schemas import AIResponseSchema, UniversalData, OncologyData, SpeechData
-from parallel_prompts import _generate_structured_summary_parallel
+from schemas import AIResponseSchema, UniversalData, OncologyData, SpeechData, PatientFriendlyResponseSchema
+from parallel_prompts import _generate_structured_summary_parallel, _generate_patient_friendly_summary
 
 # =============================================================================
 # DATABASE UTILITIES
@@ -221,10 +221,69 @@ def ensure_summary_support():
         if conn:
             conn.close()
 
+
+def ensure_patient_friendly_summary_support():
+    """Validate patient_friendly_summaries presence/shape without redefining schema at runtime."""
+    conn = None
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor()
+        cur.execute("SELECT to_regclass('public.patient_friendly_summaries')")
+        table_name = cur.fetchone()[0]
+        if not table_name:
+            logger.warning(
+                "patient_friendly_summaries table not found. Apply schema.sql/migrations before using patient-friendly summary endpoints."
+            )
+            cur.close()
+            conn.close()
+            return
+
+        # Ensure expected indexes exist, regardless of storage column type.
+        cur.execute(
+            "CREATE INDEX IF NOT EXISTS idx_patient_friendly_summaries_patient_id ON patient_friendly_summaries(patient_id)"
+        )
+        cur.execute(
+            "CREATE INDEX IF NOT EXISTS idx_patient_friendly_summaries_generated_at ON patient_friendly_summaries(generated_at DESC)"
+        )
+        conn.commit()
+        cur.close()
+        conn.close()
+    except Exception as e:
+        if conn:
+            conn.rollback()
+        logger.warning(f"ensure_patient_friendly_summary_support error (non-fatal): {e}")
+    finally:
+        if conn:
+            conn.close()
+
+
+def _get_patient_friendly_storage_column(cur) -> str:
+    """Return active storage column: simple_text or simple_text_encrypted."""
+    cur.execute(
+        """
+        SELECT column_name
+        FROM information_schema.columns
+        WHERE table_schema = 'public'
+          AND table_name = 'patient_friendly_summaries'
+          AND column_name IN ('simple_text', 'simple_text_encrypted')
+        ORDER BY column_name
+        """
+    )
+    columns = {row[0] for row in cur.fetchall()}
+    if 'simple_text_encrypted' in columns:
+        return 'simple_text_encrypted'
+    if 'simple_text' in columns:
+        return 'simple_text'
+    raise HTTPException(
+        status_code=500,
+        detail="patient_friendly_summaries has no supported summary storage column"
+    )
+
 @app.on_event("startup")
 def _startup_init():
     # Best-effort schema ensure so first request doesn't race
     ensure_summary_support()
+    ensure_patient_friendly_summary_support()
     try:
         ensure_claim_document_support()
     except Exception as e:
@@ -525,6 +584,10 @@ class SummaryResponse(BaseModel):
     specialty: Optional[str] = Field(None, description="Classified specialty")
     generated_at: Optional[str] = Field(None, description="Generation timestamp")
     citations: List[dict] = Field(default_factory=list, description="Source citations with chunk IDs and report IDs")
+
+
+class PatientFriendlySummaryRequest(BaseModel):
+    language: str = Field(default="English", description="Target patient language")
 
 def _embed_text(text: str) -> List[float]:
     """Call local Ollama embed endpoint and return embedding (list of floats)."""
@@ -1563,6 +1626,174 @@ def fetch_patient_summary(patient_id: int = Path(..., description="Patient ID to
         if 'patient_summaries' in str(e).lower():
             raise HTTPException(status_code=404, detail="Summary not prepared")
         raise HTTPException(status_code=500, detail=f"Summary fetch error: {e}")
+    finally:
+        if conn:
+            conn.close()
+
+
+@app.post("/summary/patient-friendly/{patient_id}", response_model=PatientFriendlyResponseSchema)
+async def generate_patient_friendly_summary(
+    patient_id: int = Path(..., description="Patient ID to generate patient-friendly summary for"),
+    payload: PatientFriendlySummaryRequest = Body(default=PatientFriendlySummaryRequest())
+):
+    """Generate and persist patient-friendly summary from latest technical summary."""
+    conn = None
+    try:
+        ensure_summary_support()
+        ensure_patient_friendly_summary_support()
+
+        conn = get_db_connection()
+        cur = conn.cursor()
+
+        cur.execute("SELECT to_regclass('public.patient_friendly_summaries')")
+        if not cur.fetchone()[0]:
+            raise HTTPException(
+                status_code=503,
+                detail="patient_friendly_summaries table is missing. Apply schema.sql/migrations first."
+            )
+
+        cur.execute(
+            """
+            SELECT patient_id, summary_text
+            FROM patient_summaries
+            WHERE patient_id=%s
+            ORDER BY generated_at DESC
+            LIMIT 1
+            """,
+            (patient_id,)
+        )
+        row = cur.fetchone()
+
+        if not row:
+            raise HTTPException(
+                status_code=404,
+                detail="No technical summary found. Run /summarize/{patient_id} first."
+            )
+
+        base_summary_id = row[0]
+        summary_text = row[1]
+        try:
+            technical_summary_json = json.loads(summary_text) if isinstance(summary_text, str) else summary_text
+        except Exception:
+            technical_summary_json = {"summary_text": str(summary_text)}
+
+        generated = await _generate_patient_friendly_summary(
+            technical_summary_json=technical_summary_json,
+            language=payload.language,
+            model="llama3:8b"
+        )
+        validated = PatientFriendlyResponseSchema.model_validate(generated)
+
+        storage_column = _get_patient_friendly_storage_column(cur)
+        serialized_simple_text = json.dumps(validated.model_dump())
+
+        if storage_column == 'simple_text_encrypted':
+            cur.execute(
+                """
+                INSERT INTO patient_friendly_summaries
+                  (patient_id, base_summary_id, language, simple_text_encrypted, generated_at)
+                VALUES (%s, %s, %s, pgp_sym_encrypt(%s, %s), CURRENT_TIMESTAMP)
+                """,
+                (
+                    patient_id,
+                    base_summary_id,
+                    payload.language,
+                    serialized_simple_text,
+                    ENCRYPTION_KEY,
+                )
+            )
+        else:
+            cur.execute(
+                """
+                INSERT INTO patient_friendly_summaries
+                  (patient_id, base_summary_id, language, simple_text, generated_at)
+                VALUES (%s, %s, %s, %s::jsonb, CURRENT_TIMESTAMP)
+                """,
+                (
+                    patient_id,
+                    base_summary_id,
+                    payload.language,
+                    serialized_simple_text,
+                )
+            )
+        conn.commit()
+        cur.close()
+        conn.close()
+
+        return validated
+    except HTTPException:
+        raise
+    except ValueError as e:
+        raise HTTPException(status_code=502, detail=str(e))
+    except Exception as e:
+        logger.exception(f"Patient-friendly summary generation error for patient_id={patient_id}")
+        raise HTTPException(status_code=500, detail=f"Patient-friendly summary generation error: {e}")
+    finally:
+        if conn:
+            conn.close()
+
+
+@app.get("/summary/patient-friendly/{patient_id}", response_model=PatientFriendlyResponseSchema)
+async def get_latest_patient_friendly_summary(
+    patient_id: int = Path(..., description="Patient ID to fetch latest patient-friendly summary for")
+):
+    """Fetch latest persisted patient-friendly summary."""
+    conn = None
+    try:
+        ensure_patient_friendly_summary_support()
+        conn = get_db_connection()
+        cur = conn.cursor()
+
+        cur.execute("SELECT to_regclass('public.patient_friendly_summaries')")
+        if not cur.fetchone()[0]:
+            raise HTTPException(
+                status_code=503,
+                detail="patient_friendly_summaries table is missing. Apply schema.sql/migrations first."
+            )
+
+        storage_column = _get_patient_friendly_storage_column(cur)
+
+        if storage_column == 'simple_text_encrypted':
+            cur.execute(
+                """
+                SELECT pgp_sym_decrypt(simple_text_encrypted, %s)::text AS simple_text
+                FROM patient_friendly_summaries
+                WHERE patient_id=%s
+                ORDER BY generated_at DESC, id DESC
+                LIMIT 1
+                """,
+                (ENCRYPTION_KEY, patient_id)
+            )
+            row = cur.fetchone()
+            if not row:
+                raise HTTPException(status_code=404, detail="No patient-friendly summary found")
+            simple_text = row[0]
+            simple_text_json = json.loads(simple_text)
+        else:
+            cur.execute(
+                """
+                SELECT simple_text
+                FROM patient_friendly_summaries
+                WHERE patient_id=%s
+                ORDER BY generated_at DESC, id DESC
+                LIMIT 1
+                """,
+                (patient_id,)
+            )
+            row = cur.fetchone()
+            if not row:
+                raise HTTPException(status_code=404, detail="No patient-friendly summary found")
+            simple_text_json = row[0]
+
+        validated = PatientFriendlyResponseSchema.model_validate(simple_text_json)
+        cur.close()
+        conn.close()
+        return validated
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception(f"Patient-friendly summary fetch error for patient_id={patient_id}")
+        raise HTTPException(status_code=500, detail=f"Patient-friendly summary fetch error: {e}")
     finally:
         if conn:
             conn.close()
